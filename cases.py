@@ -15,19 +15,30 @@ ROUTE_LABELS = {
     "original_compressed": "4. Compressed original language",
 }
 
+# TRANSFORMATION_PROMPTS = {
+#     "english": """
+# Translate the source_prompt value faithfully into English.
+# """,
+#     "english_compressed": """
+# Translate the source_prompt value into compact English.
+# Remove only filler, repeated politeness, redundancy, and duplicated instructions.
+# """,
+#     "original_compressed": """
+# Rewrite the source_prompt value more compactly in its original language.
+# Remove only filler, repeated politeness, redundancy, and duplicated instructions.
+# """,
+# }
+
+
 TRANSFORMATION_PROMPTS = {
-    "english": """
-Translate the source_prompt value faithfully into English.
-""",
+
     "english_compressed": """
 Translate the source_prompt value into compact English.
 Remove only filler, repeated politeness, redundancy, and duplicated instructions.
-""",
-    "original_compressed": """
-Rewrite the source_prompt value more compactly in its original language.
-Remove only filler, repeated politeness, redundancy, and duplicated instructions.
-""",
+"""
 }
+
+
 
 TRANSFORMATION_CONTRACT = """
 You are a prompt-transformation engine, not a task-solving assistant.
