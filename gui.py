@@ -7,7 +7,7 @@ import threading
 import tkinter as tk
 from tkinter import messagebox, scrolledtext, ttk
 
-from cases import ROUTE_LABELS, run_four_routes
+from cases import ROUTE_LABELS, generate_prompt_variants
 
 
 class PromptComparisonApp:
@@ -31,7 +31,7 @@ class PromptComparisonApp:
         container.columnconfigure(0, weight=1)
         container.rowconfigure(3, weight=1)
 
-        ttk.Label(container, text="Enter a prompt (Chinese supported):").grid(
+        ttk.Label(container, text="Enter a prompt").grid(
             row=0, column=0, sticky="w"
         )
         self.prompt_entry = scrolledtext.ScrolledText(
@@ -89,7 +89,7 @@ class PromptComparisonApp:
 
         self.submit_button.configure(state=tk.DISABLED)
         self.completed_routes = 0
-        self.status.configure(text="Transforming prompts...")
+        self.status.configure(text="Generating prompt variants...")
         for route in self.output_boxes:
             self._set_output(route, "Waiting...")
 
@@ -99,11 +99,11 @@ class PromptComparisonApp:
         worker.start()
 
     def _run_submission(self, prompt: str) -> None:
-        def report(route: str, answer: str | None, error: str | None) -> None:
-            self.events.put(("result", (route, answer, error)))
+        def report(route: str, prompt_text: str | None, error: str | None) -> None:
+            self.events.put(("result", (route, prompt_text, error)))
 
         try:
-            run_four_routes(prompt, on_result=report)
+            generate_prompt_variants(prompt, on_result=report)
         except Exception as exc:
             self.events.put(("fatal", str(exc)))
         finally:
@@ -114,11 +114,14 @@ class PromptComparisonApp:
             while True:
                 event, payload = self.events.get_nowait()
                 if event == "result":
-                    route, answer, error = payload  # type: ignore[misc]
+                    route, prompt_text, error = payload  # type: ignore[misc]
                     self.completed_routes += 1
-                    self._set_output(route, answer if answer is not None else f"ERROR\n\n{error}")
+                    self._set_output(
+                        route,
+                        prompt_text if prompt_text is not None else f"ERROR\n\n{error}",
+                    )
                     self.status.configure(
-                        text=f"Receiving answers... {self.completed_routes}/4"
+                        text=f"Receiving prompt variants... {self.completed_routes}/4"
                     )
                 elif event == "fatal":
                     messagebox.showerror("Request failed", str(payload))
