@@ -1,0 +1,130 @@
+"""Replaceable provider, tokenizer, and pricing contracts."""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+from typing import Protocol
+
+from slashtoken.core.models import (
+    AnswerEvaluationResult,
+    ChatResult,
+    ProtectedSpan,
+    ProviderTextResult,
+    TokenCount,
+    VerificationResult,
+    WorkloadMode,
+)
+
+
+class OptimizationProvider(Protocol):
+    name: str
+
+    def transform(
+        self,
+        *,
+        source_prompt: str,
+        source_language: str,
+        response_language: str,
+        protected_spans: tuple[ProtectedSpan, ...],
+    ) -> ProviderTextResult: ...
+
+    def verify(
+        self,
+        *,
+        source_prompt: str,
+        candidate_prompt: str,
+        source_language: str,
+        response_language: str,
+    ) -> VerificationResult: ...
+
+    def chat(
+        self,
+        *,
+        prompt: str,
+        response_language: str,
+        workload_mode: WorkloadMode,
+        output_optimization: bool = False,
+    ) -> ChatResult: ...
+
+    def compare_answers(
+        self,
+        *,
+        source_prompt: str,
+        baseline_answer: str,
+        optimized_answer: str,
+        source_language: str,
+    ) -> AnswerEvaluationResult: ...
+
+
+class TokenCounter(Protocol):
+    def count(self, text: str, model: str) -> TokenCount: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ModelPrice:
+    input_per_million_usd: float
+    output_per_million_usd: float
+    cached_input_per_million_usd: float = 0.0
+
+
+class PricingCatalog:
+    """Versioned model pricing used for end-to-end API calculations."""
+
+    def __init__(self, prices: dict[str, ModelPrice] | None = None) -> None:
+        self._prices = dict(prices or {})
+
+    def estimate(
+        self,
+        model: str,
+        *,
+        input_tokens: int = 0,
+        cached_input_tokens: int = 0,
+        output_tokens: int = 0,
+    ) -> float:
+        price = self._prices.get(model)
+        if price is None:
+            return 0.0
+        return (
+            input_tokens * price.input_per_million_usd
+            + cached_input_tokens * price.cached_input_per_million_usd
+            + output_tokens * price.output_per_million_usd
+        ) / 1_000_000
+
+    def has_price(self, model: str) -> bool:
+        return model in self._prices
+
+
+class ApproximateTokenCounter:
+    """Dependency-free preview estimate; never marked exact for auto-routing."""
+
+    def count(self, text: str, model: str) -> TokenCount:
+        utf8_bytes = len(text.encode("utf-8"))
+        ascii_chars = sum(character.isascii() for character in text)
+        non_ascii_chars = len(text) - ascii_chars
+        estimate = math.ceil(ascii_chars / 4 + non_ascii_chars / 1.6)
+        return TokenCount(
+            tokens=max(1, estimate),
+            exact=False,
+            tokenizer=f"approximate-utf8:{model}",
+        )
+
+
+class TiktokenCounter:
+    """Target-model counter with an explicit approximate fallback."""
+
+    def __init__(self) -> None:
+        self._fallback = ApproximateTokenCounter()
+
+    def count(self, text: str, model: str) -> TokenCount:
+        try:
+            import tiktoken
+
+            encoding = tiktoken.encoding_for_model(model)
+        except (ImportError, KeyError):
+            return self._fallback.count(text, model)
+        return TokenCount(
+            tokens=len(encoding.encode(text)),
+            exact=True,
+            tokenizer=f"tiktoken:{encoding.name}",
+        )

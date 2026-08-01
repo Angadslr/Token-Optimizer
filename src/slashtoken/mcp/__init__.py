@@ -1,0 +1,2 @@
+"""SlashToken MCP adapter."""
+

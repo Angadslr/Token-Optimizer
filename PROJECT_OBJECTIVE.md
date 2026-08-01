@@ -1,10 +1,10 @@
-# Project Objective and Context
+# SlashToken Project Objective and Context
 
 Use this document as the durable source of truth when starting a new ChatGPT or Codex conversation about this project.
 
 ## One-sentence objective
 
-Create a multilingual LLM optimization gateway that selects the lowest-cost request path that still meets explicit thresholds for intent preservation, response quality, privacy, and latency.
+Create SlashToken, a multilingual LLM optimization gateway that selects the lowest-cost request path that still meets explicit thresholds for intent preservation, response quality, privacy, and latency.
 
 ## The problem
 

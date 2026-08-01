@@ -1,0 +1,38 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "slashtoken"
+version = "0.1.0"
+description = "Verified multilingual prompt routing for Codex and LLM APIs"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Angad Srivastava" }]
+dependencies = [
+  "fastapi>=0.115,<1",
+  "jinja2>=3.1,<4",
+  "mcp>=1.9,<2",
+  "openai>=1.70,<3",
+  "pydantic>=2.10,<3",
+  "python-dotenv>=1.0,<2",
+  "uvicorn[standard]>=0.34,<1",
+]
+
+[project.optional-dependencies]
+tokenizers = ["tiktoken>=0.9,<1"]
+dev = [
+  "httpx>=0.28,<1",
+  "pytest>=8.3,<9",
+]
+
+[project.scripts]
+slashtoken = "slashtoken.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/slashtoken"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

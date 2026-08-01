@@ -1,0 +1,2 @@
+"""SlashToken test suite."""
+

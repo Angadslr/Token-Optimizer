@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SlashToken operator console</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='styles.css') }}?v={{ static_version }}">
+</head>
+
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="product-mark">
+        <span class="prompt-symbol" aria-hidden="true">~/</span>
+        <h1>SlashToken</h1>
+      </div>
+      <nav class="tabs" aria-label="Workspace sections">
+        <a class="tab active" href="#router">Router</a>
+        <a class="tab" href="#decision">Decision</a>
+        <a class="tab" href="#console">Console</a>
+      </nav>
+      <div class="connection-group">
+        <span id="connection" class="status status-warn">codex.connecting</span>
+        <span class="endpoint">local://gateway</span>
+      </div>
+    </header>
+
+    <section class="controls-card" aria-label="Routing configuration">
+      <div class="field project-field">
+        <label for="project">project.path</label>
+        <input id="project" value="{{ default_project }}">
+      </div>
+      <div class="field model-field">
+        <p id="reasoning-effort-help" class="field-help">
+          Reasoning effort is inherited from Codex. For SlashToken, set
+          <code>model_reasoning_effort = "low"</code> (or another level supported by the model) in
+          <code>~/.codex/config.toml</code>, then restart SlashToken. In Codex, use <code>/model</code> for
+          the current task.
+        </p>
+        <label for="model">codex.model</label>
+        <select id="model" aria-describedby="reasoning-effort-help">
+          <option value="">loading.models</option>
+        </select>
+      </div>
+      <div class="field mode-field">
+        <label for="mode">workload.mode</label>
+        <select id="mode">
+          <option value="agentic_coding">agentic_coding</option>
+          <option value="chatbot">chatbot</option>
+        </select>
+      </div>
+      <label class="toggle">
+        <input id="languageOptimization" type="checkbox" checked>
+        <span>optimize.language</span>
+      </label>
+      <label class="toggle">
+        <input id="outputOptimization" type="checkbox">
+        <span>optimize.output</span>
+      </label>
+    </section>
+
+    <main id="router" class="workspace">
+      <section class="panel composer-card" aria-labelledby="input-title">
+        <header class="panel-bar">
+          <div class="panel-heading">
+            <span class="disclosure" aria-hidden="true">›</span>
+            <h2 id="input-title">route.input</h2>
+            <span class="file-type">prompt.txt</span>
+          </div>
+          <button id="optimize" class="primary">analyze()</button>
+        </header>
+        <div class="editor">
+          <pre id="promptGutter" class="editor-gutter" aria-hidden="true">1</pre>
+          <textarea id="prompt" rows="9" spellcheck="true"
+            placeholder="Enter a Chinese, Arabic, or Turkish prompt. SlashToken will never submit it before approval."></textarea>
+        </div>
+        <footer class="panel-status">
+          <p id="message" class="message">Nothing is sent to Codex until you approve a route.</p>
+          <span>supported: zh · ar · tr</span>
+        </footer>
+      </section>
+
+      <section id="decision" class="decision-grid hidden" aria-label="Route decision workspace">
+        <article class="panel comparison-card">
+          <header class="panel-bar">
+            <h2>original.route</h2>
+            <span id="originalTokens" class="metric"></span>
+          </header>
+          <pre id="originalPrompt" class="route-content"></pre>
+          <footer class="panel-actions">
+            <button id="useOriginal" class="secondary">submit(original)</button>
+          </footer>
+        </article>
+
+        <article class="panel comparison-card">
+          <header class="panel-bar">
+            <h2 class="verified-label">verified.candidate</h2>
+            <span id="candidateTokens" class="metric"></span>
+          </header>
+          <textarea id="candidatePrompt" class="route-content candidate-content" rows="13"></textarea>
+          <footer class="panel-actions">
+            <button id="useCandidate" class="primary">approve(candidate)</button>
+          </footer>
+        </article>
+
+        <aside class="panel receipt-card" aria-labelledby="receipt-title">
+          <header class="panel-bar">
+            <h2 id="receipt-title">decision.receipt</h2>
+            <span class="inspector-label">inspector</span>
+          </header>
+          <div class="receipt-content">
+            <h3 id="decisionStatus" class="decision-state">waiting</h3>
+            <p id="receipt" class="receipt-message"></p>
+            <dl id="decisionMetrics"></dl>
+            <div class="receipt-actions">
+              <button id="autoSession" class="text-button">set(auto_run.session)</button>
+              <button id="autoProject" class="text-button">set(auto_run.project)</button>
+            </div>
+          </div>
+        </aside>
+      </section>
+
+      <section id="runInspector" class="run-inspector hidden" aria-label="Active Codex run">
+        <section id="approvalPanel" class="panel approval-panel hidden" aria-labelledby="approval-title">
+          <header class="panel-bar">
+            <div class="panel-heading">
+              <span class="terminal-symbol" aria-hidden="true">!</span>
+              <h2 id="approval-title">codex.approvals</h2>
+            </div>
+            <span class="inspector-label">input required</span>
+          </header>
+          <div id="approvals" class="approval-list"></div>
+        </section>
+
+        <section class="panel analytics-panel" aria-labelledby="analytics-title">
+          <header class="panel-bar">
+            <div class="panel-heading">
+              <span class="terminal-symbol" aria-hidden="true">Σ</span>
+              <h2 id="analytics-title">codex.analytics</h2>
+            </div>
+            <span id="runStatus" class="run-state">idle</span>
+          </header>
+          <div id="usageCards" class="usage-grid"></div>
+          <p class="analytics-note">Cached input is part of input tokens. Reasoning output is part of output tokens. Do not add either value to total tokens again.</p>
+        </section>
+      </section>
+
+      <section id="console" class="panel output-card" aria-labelledby="output-title">
+        <header class="panel-bar console-bar">
+          <div class="panel-heading">
+            <span class="terminal-symbol" aria-hidden="true">&gt;_</span>
+            <h2 id="output-title">codex.stream</h2>
+          </div>
+          <div class="console-actions">
+            <span>approval boundary: enabled</span>
+            <button id="interrupt" class="danger" disabled>interrupt()</button>
+          </div>
+        </header>
+        <pre id="output" class="terminal-output"><span class="log-muted">[info]</span> gateway.ready
+<span class="log-cursor">_</span></pre>
+      </section>
+    </main>
+
+    <footer class="statusbar">
+      <span>VERIFIED_ROUTING</span>
+      <span>raw prompts: not persisted</span>
+      <span>route: explicit approval</span>
+    </footer>
+  </div>
+  <script src="{{ url_for('static', path='app.js') }}?v={{ static_version }}" defer></script>
+</body>
+
+</html>

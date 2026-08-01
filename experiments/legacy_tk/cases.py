@@ -296,6 +296,7 @@ def generate_prompt_variants(prompt, on_result=None):
     """Return the original prompt and three transformed prompt variants."""
     if not prompt.strip():
         raise ValueError("Prompt cannot be empty.")
+        
 
     results = {"original": (prompt, None)}
 

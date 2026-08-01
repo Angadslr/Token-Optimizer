@@ -1,0 +1,7 @@
+{"id":"zh-code-001","language":"zh","category":"coding","workload_mode":"agentic_coding","prompt":"请分析这个 Python 服务的并发错误，保留函数名 `process_batch`、错误代码 ERR-2048 和超时值 30 秒。请用中文给出完整修复方案、测试和风险说明，不要省略任何约束。"}
+{"id":"zh-chat-001","language":"zh","category":"analysis","workload_mode":"chatbot","prompt":"请比较事件驱动架构与请求响应架构的优缺点，保留网址 https://example.com/spec，并用中文给出适合小型团队的专业建议和明确的选择标准。"}
+{"id":"ar-code-001","language":"ar","category":"coding","workload_mode":"agentic_coding","prompt":"حلّل خطأ التزامن في خدمة Python مع الحفاظ على اسم الدالة `process_batch` والرمز ERR-2048 والمهلة 30 ثانية. أجب بالعربية مع الإصلاح الكامل والاختبارات والمخاطر."}
+{"id":"ar-chat-001","language":"ar","category":"analysis","workload_mode":"chatbot","prompt":"قارن بين البنية المعتمدة على الأحداث وبنية الطلب والاستجابة، واحتفظ بالرابط https://example.com/spec، ثم قدّم توصية مهنية كاملة لفريق صغير باللغة العربية."}
+{"id":"tr-code-001","language":"tr","category":"coding","workload_mode":"agentic_coding","prompt":"Python hizmetindeki eşzamanlılık hatasını analiz et; `process_batch`, ERR-2048 ve 30 saniye değerlerini aynen koru. Türkçe olarak eksiksiz düzeltme, testler ve riskleri sun."}
+{"id":"tr-chat-001","language":"tr","category":"analysis","workload_mode":"chatbot","prompt":"Olay güdümlü mimari ile istek-yanıt mimarisini karşılaştır, https://example.com/spec bağlantısını aynen koru ve küçük bir ekip için Türkçe, profesyonel ve eksiksiz seçim ölçütleri sun."}
+

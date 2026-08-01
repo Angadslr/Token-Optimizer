@@ -1,4 +1,4 @@
-# Multilingual Token Cost Optimizer Testing Methodology
+# SlashToken Testing Methodology
 
 ## Purpose
 

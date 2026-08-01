@@ -1,0 +1,2 @@
+"""SlashToken localhost web application."""
+
