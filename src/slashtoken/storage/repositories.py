@@ -182,12 +182,48 @@ class SlashTokenRepository:
                 (serialized, run_id),
             )
 
+    def update_codex_run_liveness(
+        self,
+        *,
+        run_id: str,
+        liveness: str | None = None,
+        last_event_at_ms: int | None = None,
+        last_event_method: str | None = None,
+        health: dict[str, Any] | None = None,
+    ) -> None:
+        assignments: list[str] = []
+        values: list[Any] = []
+        if liveness is not None:
+            assignments.append("liveness = ?")
+            values.append(liveness)
+        if last_event_at_ms is not None:
+            assignments.append("last_event_at = ?")
+            values.append(int(last_event_at_ms))
+        if last_event_method is not None:
+            assignments.append("last_event_method = ?")
+            values.append(last_event_method)
+        if health is not None:
+            assignments.append("health_json = ?")
+            values.append(
+                json.dumps(health, sort_keys=True, separators=(",", ":"))
+            )
+        if not assignments:
+            return
+        assignments.append("updated_at = CURRENT_TIMESTAMP")
+        values.append(run_id)
+        query = (
+            f"UPDATE codex_runs SET {', '.join(assignments)} WHERE run_id = ?"
+        )
+        with self.database.session() as connection:
+            connection.execute(query, tuple(values))
+
     def get_codex_run(self, run_id: str) -> dict[str, Any] | None:
         with self.database.session() as connection:
             row = connection.execute(
                 """
                 SELECT run_id, decision_id, thread_id, turn_id, model, status,
-                       failure_code, usage_json, started_at, updated_at, completed_at
+                       failure_code, usage_json, last_event_at, last_event_method,
+                       liveness, health_json, started_at, updated_at, completed_at
                 FROM codex_runs
                 WHERE run_id = ?
                 """,
@@ -197,6 +233,8 @@ class SlashTokenRepository:
             return None
         result = dict(row)
         result["usage"] = json.loads(result.pop("usage_json"))
+        health_json = result.pop("health_json", None)
+        result["health"] = json.loads(health_json) if health_json else None
         return result
 
     def latest_thread_usage(

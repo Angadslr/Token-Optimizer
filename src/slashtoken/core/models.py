@@ -40,6 +40,7 @@ class FallbackReason(StrEnum):
     INEXACT_TOKENIZER = "inexact_tokenizer"
     PROTECTED_SPAN_MISMATCH = "protected_span_mismatch"
     VERIFICATION_FAILED = "verification_failed"
+    PROVIDER_UNAVAILABLE = "provider_unavailable"
     PROVIDER_ERROR = "provider_error"
 
 

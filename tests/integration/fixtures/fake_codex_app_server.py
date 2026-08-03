@@ -174,6 +174,31 @@ for line in sys.stdin:
         if mode == "invalid_json":
             print("not-json", flush=True)
             continue
+        if mode == "oversized_event":
+            emit(
+                {
+                    "method": "item/fileChange/delta",
+                    "params": {
+                        "threadId": "thr_fake",
+                        "turnId": "turn_fake",
+                        "itemId": "file_fake",
+                        "content": "x" * 250_000,
+                    },
+                }
+            )
+            continue
+        if mode == "silent_after_turn":
+            emit(
+                {
+                    "method": "item/agentMessage/delta",
+                    "params": {
+                        "threadId": "thr_fake",
+                        "turnId": "turn_fake",
+                        "delta": "working",
+                    },
+                }
+            )
+            continue
         if mode == "failed":
             complete(
                 "failed",

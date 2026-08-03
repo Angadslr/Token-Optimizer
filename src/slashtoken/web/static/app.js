@@ -12,8 +12,10 @@ const state = {
   runId: sessionStorage.getItem(RUN_KEY),
   threadId: sessionStorage.getItem(THREAD_KEY),
   runStatus: "idle",
+  liveness: "active",
   lastEventAtMs: null,
   silenceWarningSeconds: 120,
+  idleDiagnosticSeconds: 300,
   approvals: new Map(),
   reconnectTimer: null,
 };
@@ -178,6 +180,7 @@ function applyRun(run) {
   if (!run) return;
   state.runId = run.run_id;
   state.runStatus = run.status;
+  state.liveness = run.liveness || "active";
   state.lastEventAtMs = run.last_event_at_ms || state.lastEventAtMs;
   if (run.thread_id) {
     state.threadId = run.thread_id;
@@ -190,7 +193,10 @@ function applyRun(run) {
   });
   $("runInspector").classList.remove("hidden");
   $("runStatus").textContent = runStatusLabel(run);
-  $("runStatus").className = `run-state run-state-${run.status}`;
+  $("runStatus").className =
+    run.status === "running" && run.liveness === "unresponsive"
+      ? "run-state run-state-warning"
+      : `run-state run-state-${run.status}`;
   $("interrupt").disabled = terminalStatuses.has(run.status);
   renderApprovals();
   renderUsage(run.usage || {});
@@ -199,6 +205,9 @@ function applyRun(run) {
 function runStatusLabel(run) {
   if (run.status === "waiting_for_approval") return "waiting for approval";
   if (run.status === "failed" && run.failure_code) return `failed · ${run.failure_code}`;
+  if (run.status === "running" && run.liveness === "unresponsive") {
+    return "running · unresponsive";
+  }
   return run.status.replaceAll("_", " ");
 }
 
@@ -369,6 +378,7 @@ function handleMessage(message) {
     });
   } else if (message.type === "attached") {
     state.silenceWarningSeconds = message.silence_warning_seconds || 120;
+    state.idleDiagnosticSeconds = message.idle_diagnostic_seconds || 300;
     $("connection").textContent = "codex.connected";
     $("connection").className = "status status-ok";
     sendSocket({ action: "models" });
@@ -379,6 +389,7 @@ function handleMessage(message) {
     sessionStorage.setItem(RUN_KEY, state.runId);
   } else if (message.type === "codex_event") {
     state.lastEventAtMs = Date.now();
+    state.liveness = "active";
     appendEvent(message.event);
   } else if (message.type === "run_snapshot") {
     output.textContent = message.replay_truncated ? "[earlier activity omitted]\n" : "";
@@ -468,7 +479,9 @@ setInterval(() => {
     && state.lastEventAtMs
     && Date.now() - state.lastEventAtMs > state.silenceWarningSeconds * 1000
   ) {
-    $("runStatus").textContent = `running · no event for ${Math.floor((Date.now() - state.lastEventAtMs) / 60000)}m`;
+    const minutes = Math.floor((Date.now() - state.lastEventAtMs) / 60000);
+    const prefix = state.liveness === "unresponsive" ? "running · unresponsive" : "running";
+    $("runStatus").textContent = `${prefix} · no event for ${minutes}m`;
     $("runStatus").className = "run-state run-state-warning";
   }
   if (state.approvals.size) renderApprovals();

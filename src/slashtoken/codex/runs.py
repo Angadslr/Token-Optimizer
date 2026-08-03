@@ -39,6 +39,8 @@ class CodexRunConfig:
     approval_resolution_seconds: float = 10.0
     interrupt_timeout_seconds: float = 10.0
     silence_warning_seconds: float = 120.0
+    idle_diagnostic_seconds: float = 300.0
+    stream_limit_bytes: int = 16 * 1024 * 1024
     replay_event_limit: int = 1_000
     replay_byte_limit: int = 1_048_576
 
@@ -59,6 +61,12 @@ class CodexRunConfig:
             ),
             silence_warning_seconds=_positive_float(
                 "SLASHTOKEN_CODEX_SILENCE_WARNING_SECONDS", 120.0
+            ),
+            idle_diagnostic_seconds=_positive_float(
+                "SLASHTOKEN_CODEX_IDLE_DIAGNOSTIC_SECONDS", 300.0
+            ),
+            stream_limit_bytes=_positive_int(
+                "SLASHTOKEN_CODEX_STREAM_LIMIT_BYTES", 16 * 1024 * 1024
             ),
         )
 
@@ -112,6 +120,9 @@ class CodexRun:
     started_at_ms: int = field(default_factory=lambda: int(time.time() * 1000))
     completed_at_ms: int | None = None
     last_event_at_ms: int = field(default_factory=lambda: int(time.time() * 1000))
+    last_event_method: str | None = None
+    liveness: str = "active"
+    last_persisted_event_ms: int = 0
     usage: dict[str, Any] = field(default_factory=dict)
     baseline_usage: dict[str, int] | None = None
     events: deque[dict[str, Any]] = field(default_factory=deque)
@@ -121,6 +132,7 @@ class CodexRun:
     terminal_event: asyncio.Event = field(default_factory=asyncio.Event)
     task: asyncio.Task[None] | None = None
     escalation_task: asyncio.Task[None] | None = None
+    liveness_task: asyncio.Task[None] | None = None
 
     def public_dict(self) -> dict[str, Any]:
         return {
@@ -134,6 +146,8 @@ class CodexRun:
             "started_at_ms": self.started_at_ms,
             "completed_at_ms": self.completed_at_ms,
             "last_event_at_ms": self.last_event_at_ms,
+            "last_event_method": self.last_event_method,
+            "liveness": self.liveness,
             "usage": self.usage,
             "pending_approvals": [
                 approval.public_dict() for approval in self.approvals.values()
@@ -158,14 +172,17 @@ class CodexRunManager:
         self,
         runtime: SlashTokenRuntime,
         *,
-        client_factory: Callable[[], CodexAppServerClient] = CodexAppServerClient,
+        client_factory: Callable[[], CodexAppServerClient] | None = None,
         config: CodexRunConfig | None = None,
     ) -> None:
         self.runtime = runtime
-        self.client_factory = client_factory
         self.config = config or CodexRunConfig.from_environment()
+        self.client_factory = client_factory or self._default_client_factory
         self._sessions: dict[str, BrowserCodexSession] = {}
         self._lock = asyncio.Lock()
+
+    def _default_client_factory(self) -> CodexAppServerClient:
+        return CodexAppServerClient(stream_limit_bytes=self.config.stream_limit_bytes)
 
     async def attach(
         self, *, session_id: str, requested_run_id: str | None
@@ -316,11 +333,15 @@ class CodexRunManager:
                 session.disconnect_task.cancel()
             run = session.active_run
             if run and run.status not in TERMINAL_STATUSES:
+                health = None
+                with contextlib.suppress(CodexAppServerError):
+                    health = session.codex.client.health_snapshot()
                 await self._finalize(
                     session,
                     run,
                     status="interrupted",
                     failure_code="backend_shutdown",
+                    health=health,
                 )
             await session.codex.close()
             if run and run.task and not run.task.done():
@@ -395,6 +416,9 @@ class CodexRunManager:
                 "session",
             )
             await self._set_status(session, run, "running")
+            run.liveness_task = asyncio.create_task(
+                self._liveness_watcher(session, run)
+            )
             async for event in session.codex.events():
                 await self._handle_event(session, run, event)
             if run.status not in TERMINAL_STATUSES:
@@ -437,10 +461,16 @@ class CodexRunManager:
         event: dict[str, Any],
     ) -> None:
         run.last_event_at_ms = int(time.time() * 1000)
+        method = event.get("method")
+        if isinstance(method, str):
+            run.last_event_method = method
         wrapped = {"type": "codex_event", "run_id": run.run_id, "event": event}
         self._remember_event(run, wrapped)
         await self._publish(session, wrapped)
-        method = event.get("method")
+        if run.liveness != "active" and run.status not in TERMINAL_STATUSES:
+            await self._set_liveness(session, run, "active")
+        else:
+            await self._touch_last_event(run)
         params = event.get("params")
         params = params if isinstance(params, dict) else {}
         if method in APPROVAL_METHODS and isinstance(event.get("id"), (int, str)):
@@ -628,6 +658,7 @@ class CodexRunManager:
         *,
         status: str,
         failure_code: str | None,
+        health: dict[str, Any] | None = None,
     ) -> None:
         if run.status in TERMINAL_STATUSES:
             return
@@ -638,9 +669,19 @@ class CodexRunManager:
             if approval.response_watchdog:
                 approval.response_watchdog.cancel()
         run.approvals.clear()
+        if run.liveness_task and not run.liveness_task.done():
+            run.liveness_task.cancel()
         run.failure_code = failure_code
         run.completed_at_ms = int(time.time() * 1000)
         run.terminal_event.set()
+        await asyncio.to_thread(
+            self.runtime.repository.update_codex_run_liveness,
+            run_id=run.run_id,
+            liveness=run.liveness,
+            last_event_at_ms=run.last_event_at_ms,
+            last_event_method=run.last_event_method,
+            health=health,
+        )
         await self._set_status(session, run, status, failure_code=failure_code)
         await self._publish(
             session,
@@ -678,6 +719,66 @@ class CodexRunManager:
             session,
             {"type": "run_status", "run": run.public_dict()},
         )
+
+    async def _set_liveness(
+        self,
+        session: BrowserCodexSession,
+        run: CodexRun,
+        liveness: str,
+        *,
+        health: dict[str, Any] | None = None,
+    ) -> None:
+        run.liveness = liveness
+        run.last_persisted_event_ms = run.last_event_at_ms
+        await asyncio.to_thread(
+            self.runtime.repository.update_codex_run_liveness,
+            run_id=run.run_id,
+            liveness=liveness,
+            last_event_at_ms=run.last_event_at_ms,
+            last_event_method=run.last_event_method,
+            health=health,
+        )
+        await self._publish(
+            session,
+            {"type": "run_status", "run": run.public_dict()},
+        )
+
+    async def _touch_last_event(self, run: CodexRun) -> None:
+        if run.last_event_at_ms - run.last_persisted_event_ms < 5_000:
+            return
+        run.last_persisted_event_ms = run.last_event_at_ms
+        await asyncio.to_thread(
+            self.runtime.repository.update_codex_run_liveness,
+            run_id=run.run_id,
+            last_event_at_ms=run.last_event_at_ms,
+            last_event_method=run.last_event_method,
+        )
+
+    async def _liveness_watcher(
+        self, session: BrowserCodexSession, run: CodexRun
+    ) -> None:
+        idle_seconds = self.config.idle_diagnostic_seconds
+        try:
+            while run.status not in TERMINAL_STATUSES:
+                idle_ms = int(time.time() * 1000) - run.last_event_at_ms
+                deadline_ms = int(idle_seconds * 1000)
+                if idle_ms < deadline_ms:
+                    await asyncio.sleep(max((deadline_ms - idle_ms) / 1000, 0.01))
+                    continue
+                if run.status == "running":
+                    snapshot = session.codex.client.health_snapshot()
+                    revived = await session.codex.client.check_liveness()
+                    if revived:
+                        # The blocked notification consumer will now raise and
+                        # drive the run to a terminal failure state itself.
+                        return
+                    if run.liveness != "unresponsive":
+                        await self._set_liveness(
+                            session, run, "unresponsive", health=snapshot
+                        )
+                await asyncio.sleep(idle_seconds)
+        except asyncio.CancelledError:
+            raise
 
     def _schedule_escalation(
         self,
@@ -851,6 +952,9 @@ def _turn_failure_code(error: Any) -> str:
 
 
 def _exception_code(error: BaseException) -> str:
+    code = getattr(error, "code", None)
+    if isinstance(code, str) and code:
+        return code
     name = type(error).__name__
     normalized = "".join(
         f"_{character.lower()}" if character.isupper() else character
@@ -873,6 +977,16 @@ def _positive_float(name: str, default: float) -> float:
     return parsed
 
 
+def _positive_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return default
+    parsed = int(value)
+    if parsed <= 0:
+        raise ValueError(f"{name} must be greater than zero.")
+    return parsed
+
+
 def _persisted_public_run(record: dict[str, Any]) -> dict[str, Any]:
     return {
         "run_id": record["run_id"],
@@ -882,6 +996,9 @@ def _persisted_public_run(record: dict[str, Any]) -> dict[str, Any]:
         "model": record["model"],
         "status": record["status"],
         "failure_code": record["failure_code"],
+        "last_event_at_ms": record.get("last_event_at"),
+        "last_event_method": record.get("last_event_method"),
+        "liveness": record.get("liveness") or "active",
         "started_at": record["started_at"],
         "updated_at": record["updated_at"],
         "completed_at": record["completed_at"],

@@ -13,10 +13,20 @@ from slashtoken.core.models import (
     RoutingDecision,
     VerificationResult,
 )
-from slashtoken.core.protection import extract_protected_spans, missing_protected_spans
+from slashtoken.core.protection import (
+    ProtectedPlaceholderError,
+    extract_protected_spans,
+    missing_protected_spans,
+    restore_protected_spans,
+    shield_protected_spans,
+)
 from slashtoken.core.risk import SUPPORTED_LANGUAGES, classify_risk, detect_language
 from slashtoken.core.routing import ThresholdRegistry
-from slashtoken.providers.base import OptimizationProvider, TokenCounter
+from slashtoken.providers.base import (
+    OptimizationProvider,
+    ProviderUnavailableError,
+    TokenCounter,
+)
 
 
 _LANGUAGE_NAMES = {
@@ -124,15 +134,59 @@ class OptimizationPipeline:
             )
 
         response_language = self._response_language(request.response_language, analysis.source_language)
+        completed_usage = ()
         try:
+            shielded = shield_protected_spans(prompt, analysis.protected_spans)
             transformed = self.provider.transform(
-                source_prompt=prompt,
+                source_prompt=shielded.text,
                 source_language=analysis.source_language,
                 response_language=response_language,
-                protected_spans=analysis.protected_spans,
+                protected_spans=shielded.placeholder_spans,
             )
-            candidate_tokens = self.token_counter.count(transformed.text, request.target_model)
+            completed_usage = (transformed.usage,)
             threshold = self.thresholds.get(analysis.source_language, request.target_model)
+            try:
+                candidate_prompt = restore_protected_spans(transformed.text, shielded)
+            except ProtectedPlaceholderError:
+                return self._finish(
+                    request,
+                    RoutingDecision(
+                        status=DecisionStatus.REJECTED,
+                        source_language=analysis.source_language,
+                        original_tokens=analysis.original_tokens,
+                        candidate_tokens=None,
+                        candidate_prompt=None,
+                        fallback_reason=FallbackReason.PROTECTED_SPAN_MISMATCH,
+                        receipt=(
+                            "Candidate rejected because a protected placeholder was "
+                            "changed, duplicated, reordered, or removed."
+                        ),
+                        stage_usage=(transformed.usage,),
+                        protected_span_count=len(analysis.protected_spans),
+                        threshold_version=threshold.version,
+                    ),
+                )
+
+            missing = missing_protected_spans(candidate_prompt, analysis.protected_spans)
+            if missing:
+                kinds = ", ".join(sorted({span.kind for span in missing}))
+                return self._finish(
+                    request,
+                    RoutingDecision(
+                        status=DecisionStatus.REJECTED,
+                        source_language=analysis.source_language,
+                        original_tokens=analysis.original_tokens,
+                        candidate_tokens=None,
+                        candidate_prompt=None,
+                        fallback_reason=FallbackReason.PROTECTED_SPAN_MISMATCH,
+                        receipt=f"Candidate rejected because protected {kinds} content changed or disappeared.",
+                        stage_usage=(transformed.usage,),
+                        protected_span_count=len(analysis.protected_spans),
+                        threshold_version=threshold.version,
+                    ),
+                )
+
+            candidate_tokens = self.token_counter.count(candidate_prompt, request.target_model)
 
             if candidate_tokens.tokens >= analysis.original_tokens.tokens:
                 return self._finish(
@@ -142,7 +196,7 @@ class OptimizationPipeline:
                         source_language=analysis.source_language,
                         original_tokens=analysis.original_tokens,
                         candidate_tokens=candidate_tokens,
-                        candidate_prompt=transformed.text,
+                        candidate_prompt=candidate_prompt,
                         fallback_reason=FallbackReason.NO_TOKEN_SAVINGS,
                         receipt="The candidate did not reduce target-model input tokens; use the original prompt.",
                         stage_usage=(transformed.usage,),
@@ -162,7 +216,7 @@ class OptimizationPipeline:
                         source_language=analysis.source_language,
                         original_tokens=analysis.original_tokens,
                         candidate_tokens=candidate_tokens,
-                        candidate_prompt=transformed.text,
+                        candidate_prompt=candidate_prompt,
                         fallback_reason=FallbackReason.BELOW_BREAK_EVEN,
                         receipt=(
                             "The candidate reduced tokens but did not meet the configured "
@@ -174,28 +228,9 @@ class OptimizationPipeline:
                     ),
                 )
 
-            missing = missing_protected_spans(transformed.text, analysis.protected_spans)
-            if missing:
-                kinds = ", ".join(sorted({span.kind for span in missing}))
-                return self._finish(
-                    request,
-                    RoutingDecision(
-                        status=DecisionStatus.REJECTED,
-                        source_language=analysis.source_language,
-                        original_tokens=analysis.original_tokens,
-                        candidate_tokens=candidate_tokens,
-                        candidate_prompt=transformed.text,
-                        fallback_reason=FallbackReason.PROTECTED_SPAN_MISMATCH,
-                        receipt=f"Candidate rejected because protected {kinds} content changed or disappeared.",
-                        stage_usage=(transformed.usage,),
-                        protected_span_count=len(analysis.protected_spans),
-                        threshold_version=threshold.version,
-                    ),
-                )
-
             verification = self.provider.verify(
                 source_prompt=prompt,
-                candidate_prompt=transformed.text,
+                candidate_prompt=candidate_prompt,
                 source_language=analysis.source_language,
                 response_language=response_language,
             )
@@ -208,7 +243,7 @@ class OptimizationPipeline:
                         source_language=analysis.source_language,
                         original_tokens=analysis.original_tokens,
                         candidate_tokens=candidate_tokens,
-                        candidate_prompt=transformed.text,
+                        candidate_prompt=candidate_prompt,
                         fallback_reason=FallbackReason.VERIFICATION_FAILED,
                         receipt=f"Semantic verification rejected the candidate: {verification.reason}",
                         verification=verification,
@@ -236,7 +271,7 @@ class OptimizationPipeline:
                     source_language=analysis.source_language,
                     original_tokens=analysis.original_tokens,
                     candidate_tokens=candidate_tokens,
-                    candidate_prompt=transformed.text,
+                    candidate_prompt=candidate_prompt,
                     fallback_reason=(
                         None
                         if analysis.original_tokens.exact and candidate_tokens.exact
@@ -253,6 +288,26 @@ class OptimizationPipeline:
                     threshold_version=threshold.version,
                 ),
             )
+        except ProviderUnavailableError:
+            return self._finish(
+                request,
+                RoutingDecision(
+                    status=DecisionStatus.BYPASSED,
+                    source_language=analysis.source_language,
+                    original_tokens=analysis.original_tokens,
+                    candidate_tokens=None,
+                    candidate_prompt=None,
+                    fallback_reason=FallbackReason.PROVIDER_UNAVAILABLE,
+                    receipt=(
+                        "Hosted language optimization is temporarily unavailable after "
+                        "automatic retries. The original-language prompt is ready for "
+                        "approval; no prompt was submitted. Output optimization will still "
+                        "apply if it is enabled when you submit the original."
+                    ),
+                    stage_usage=tuple(completed_usage),
+                    protected_span_count=len(analysis.protected_spans),
+                ),
+            )
         except Exception as error:
             return self._finish(
                 request,
@@ -263,7 +318,10 @@ class OptimizationPipeline:
                     candidate_tokens=None,
                     candidate_prompt=None,
                     fallback_reason=FallbackReason.PROVIDER_ERROR,
-                    receipt=f"Hosted optimization failed; no prompt was submitted. {type(error).__name__}: {error}",
+                    receipt=(
+                        "Hosted optimization failed; no prompt was submitted. "
+                        f"Failure category: {type(error).__name__}."
+                    ),
                     protected_span_count=len(analysis.protected_spans),
                 ),
             )

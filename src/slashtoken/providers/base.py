@@ -17,6 +17,23 @@ from slashtoken.core.models import (
 )
 
 
+class ProviderError(RuntimeError):
+    """Base class for safe, provider-independent hosted service failures."""
+
+
+class ProviderUnavailableError(ProviderError):
+    """Raised after retryable hosted-provider failures exhaust automatic retries."""
+
+    def __init__(self, *, stage: str, status_code: int | None = None) -> None:
+        self.stage = stage
+        self.status_code = status_code
+        status = f" (HTTP {status_code})" if status_code is not None else ""
+        super().__init__(
+            "Hosted provider temporarily unavailable during "
+            f"{stage} after automatic retries{status}."
+        )
+
+
 class OptimizationProvider(Protocol):
     name: str
 

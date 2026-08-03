@@ -28,6 +28,10 @@ AGENTIC_OUTPUT_POLICY = (
 class CodexAppServerError(RuntimeError):
     """Raised for process, transport, or JSON-RPC failures."""
 
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+
 
 def build_thread_overrides(
     *, output_optimization: bool, workload_mode: WorkloadMode
@@ -70,10 +74,12 @@ class CodexAppServerClient:
         *,
         request_timeout_seconds: float = 30.0,
         stderr_limit_bytes: int = 65_536,
+        stream_limit_bytes: int = 16 * 1024 * 1024,
     ) -> None:
         self.command = command
         self.request_timeout_seconds = request_timeout_seconds
         self.stderr_limit_bytes = stderr_limit_bytes
+        self.stream_limit_bytes = stream_limit_bytes
         self._process: asyncio.subprocess.Process | None = None
         self._reader_task: asyncio.Task[None] | None = None
         self._stderr_task: asyncio.Task[None] | None = None
@@ -88,12 +94,16 @@ class CodexAppServerClient:
         self._write_lock = asyncio.Lock()
         self._closing = False
         self._transport_failed = False
+        self._reader_failed = False
+        self._stderr_failed = False
 
     async def start(self) -> None:
         if self._process is not None:
             return
         self._closing = False
         self._transport_failed = False
+        self._reader_failed = False
+        self._stderr_failed = False
         self._notifications = asyncio.Queue()
         self._server_requests.clear()
         self._stderr_lines.clear()
@@ -104,6 +114,7 @@ class CodexAppServerClient:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                limit=self.stream_limit_bytes,
             )
         except FileNotFoundError as error:
             raise CodexAppServerError("The 'codex' executable was not found on PATH.") from error
@@ -207,6 +218,57 @@ class CodexAppServerClient:
         """Return bounded, process-local diagnostics without persisting them."""
         return tuple(self._stderr_lines)
 
+    def health_snapshot(self) -> dict[str, Any]:
+        """Return privacy-safe transport diagnostics.
+
+        Contains only booleans, counts, and a process return code. It never
+        includes stderr text, file paths, prompts, or any request payload.
+        """
+        process = self._process
+        reader = self._reader_task
+        stderr = self._stderr_task
+        return {
+            "process_running": bool(process is not None and process.returncode is None),
+            "returncode": process.returncode if process is not None else None,
+            "reader_task_done": bool(reader is not None and reader.done()),
+            "reader_task_failed": self._reader_failed,
+            "stderr_task_done": bool(stderr is not None and stderr.done()),
+            "stderr_task_failed": self._stderr_failed,
+            "pending_request_count": len(self._pending),
+            "pending_server_request_count": len(self._server_requests),
+            "transport_failed": self._transport_failed,
+            "stderr_line_count": len(self._stderr_lines),
+        }
+
+    async def check_liveness(self) -> bool:
+        """Wake a blocked notification consumer if the transport is provably dead.
+
+        Returns True when a transport failure was raised as a result of this
+        probe. A live-but-quiet transport returns False and is left untouched.
+        """
+        if self._transport_failed or self._closing:
+            return False
+        process = self._process
+        reader = self._reader_task
+        if process is not None and process.returncode is not None:
+            await self._fail_transport(
+                CodexAppServerError(
+                    f"Codex App Server exited unexpectedly (code {process.returncode}).",
+                    code="app_server_exited",
+                )
+            )
+            return True
+        if reader is not None and reader.done():
+            self._reader_failed = True
+            await self._fail_transport(
+                CodexAppServerError(
+                    "Codex App Server stdout reader is no longer running.",
+                    code="stdout_reader_failed",
+                )
+            )
+            return True
+        return False
+
     async def list_models(self) -> list[dict[str, Any]]:
         result = await self.request("model/list", {"limit": 100, "includeHidden": False})
         data = result.get("data", [])
@@ -304,58 +366,93 @@ class CodexAppServerClient:
             await process.stdin.drain()
 
     async def _read_stdout(self) -> None:
-        process = self._ensure_running()
-        assert process.stdout is not None
-        while line := await process.stdout.readline():
-            try:
-                message = json.loads(line)
-            except json.JSONDecodeError as error:
+        try:
+            process = self._ensure_running()
+            assert process.stdout is not None
+            while line := await process.stdout.readline():
+                await self._dispatch(line)
+            if not self._closing:
+                returncode = await process.wait()
                 await self._fail_transport(
                     CodexAppServerError(
-                        f"Codex App Server returned invalid JSON: {error.msg}."
+                        f"Codex App Server exited unexpectedly (code {returncode}).",
+                        code="app_server_exited",
                     )
                 )
-                return
-            if not isinstance(message, dict):
-                continue
-            request_id = message.get("id")
-            method = message.get("method")
-            if isinstance(method, str):
-                if request_id is not None and isinstance(request_id, (int, str)):
-                    self._server_requests[request_id] = message
-                if method == "serverRequest/resolved":
-                    params = message.get("params")
-                    resolved_id = params.get("requestId") if isinstance(params, dict) else None
-                    if isinstance(resolved_id, (int, str)):
-                        self._server_requests.pop(resolved_id, None)
-                await self._notifications.put(message)
-            elif isinstance(request_id, int) and request_id in self._pending:
-                future = self._pending.pop(request_id)
-                if "error" in message:
-                    error = message["error"]
-                    future.set_exception(CodexAppServerError(str(error)))
-                else:
-                    result = message.get("result", {})
-                    future.set_result(result if isinstance(result, dict) else {})
-        if not self._closing:
-            returncode = await process.wait()
+        except asyncio.CancelledError:
+            raise
+        except ValueError as error:
+            # asyncio.StreamReader.readline() raises ValueError when a line
+            # exceeds the configured stream limit before a newline is found.
+            self._reader_failed = True
             await self._fail_transport(
                 CodexAppServerError(
-                    f"Codex App Server exited unexpectedly (code {returncode})."
+                    "Codex App Server emitted a stdout line beyond the configured "
+                    f"stream limit of {self.stream_limit_bytes} bytes: {error}.",
+                    code="stdout_line_limit_exceeded",
+                )
+            )
+        except Exception as error:
+            self._reader_failed = True
+            await self._fail_transport(
+                CodexAppServerError(
+                    f"Codex App Server stdout reader failed: {error}.",
+                    code="stdout_reader_failed",
                 )
             )
 
+    async def _dispatch(self, line: bytes) -> None:
+        try:
+            message = json.loads(line)
+        except json.JSONDecodeError as error:
+            self._reader_failed = True
+            await self._fail_transport(
+                CodexAppServerError(
+                    f"Codex App Server returned invalid JSON: {error.msg}.",
+                    code="invalid_json",
+                )
+            )
+            raise
+        if not isinstance(message, dict):
+            return
+        request_id = message.get("id")
+        method = message.get("method")
+        if isinstance(method, str):
+            if request_id is not None and isinstance(request_id, (int, str)):
+                self._server_requests[request_id] = message
+            if method == "serverRequest/resolved":
+                params = message.get("params")
+                resolved_id = params.get("requestId") if isinstance(params, dict) else None
+                if isinstance(resolved_id, (int, str)):
+                    self._server_requests.pop(resolved_id, None)
+            await self._notifications.put(message)
+        elif isinstance(request_id, int) and request_id in self._pending:
+            future = self._pending.pop(request_id)
+            if "error" in message:
+                error = message["error"]
+                future.set_exception(CodexAppServerError(str(error)))
+            else:
+                result = message.get("result", {})
+                future.set_result(result if isinstance(result, dict) else {})
+
     async def _drain_stderr(self) -> None:
-        process = self._ensure_running()
-        assert process.stderr is not None
-        while line := await process.stderr.readline():
-            decoded = line.decode("utf-8", errors="replace")
-            encoded_size = len(decoded.encode("utf-8"))
-            self._stderr_lines.append(decoded)
-            self._stderr_bytes += encoded_size
-            while self._stderr_lines and self._stderr_bytes > self.stderr_limit_bytes:
-                removed = self._stderr_lines.popleft()
-                self._stderr_bytes -= len(removed.encode("utf-8"))
+        try:
+            process = self._ensure_running()
+            assert process.stderr is not None
+            while line := await process.stderr.readline():
+                decoded = line.decode("utf-8", errors="replace")
+                encoded_size = len(decoded.encode("utf-8"))
+                self._stderr_lines.append(decoded)
+                self._stderr_bytes += encoded_size
+                while self._stderr_lines and self._stderr_bytes > self.stderr_limit_bytes:
+                    removed = self._stderr_lines.popleft()
+                    self._stderr_bytes -= len(removed.encode("utf-8"))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Stderr is diagnostics only. A dead stderr reader is recorded so the
+            # health snapshot can surface it, but it must not fail the transport.
+            self._stderr_failed = True
 
     async def _fail_transport(self, error: CodexAppServerError) -> None:
         if self._transport_failed or self._closing:

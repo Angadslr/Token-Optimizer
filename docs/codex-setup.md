@@ -39,6 +39,19 @@ SlashToken does not weaken Codex sandbox or command-approval settings.
 not mean that the entire turn finished. The authoritative terminal event is
 `turn/completed`, including its status.
 
+### Temporary hosted-provider failures
+
+The NVIDIA-hosted language optimizer automatically retries temporary connection,
+timeout, rate-limit, overload, and server failures. If those retries are exhausted,
+SlashToken safely bypasses language optimization and presents the unchanged original
+prompt for approval instead of reporting an unusable candidate. Nothing is submitted
+automatically.
+
+Output optimization is independent of hosted language optimization. If output
+optimization is enabled, it still applies when you approve and submit the original
+prompt. Authentication failures and malformed provider responses continue to fail
+closed rather than being treated as temporary outages.
+
 ### Approvals and stalled runs
 
 SlashToken follows the Codex App Server approval lifecycle: it keeps a request pending
@@ -87,11 +100,39 @@ export SLASHTOKEN_CODEX_DISCONNECT_GRACE_SECONDS=600
 export SLASHTOKEN_CODEX_APPROVAL_RESOLUTION_SECONDS=10
 export SLASHTOKEN_CODEX_INTERRUPT_TIMEOUT_SECONDS=10
 export SLASHTOKEN_CODEX_SILENCE_WARNING_SECONDS=120
+export SLASHTOKEN_CODEX_IDLE_DIAGNOSTIC_SECONDS=300
+export SLASHTOKEN_CODEX_STREAM_LIMIT_BYTES=16777216
 ```
 
 All values must be greater than zero. Short values are intended only for deterministic
 tests; production use should leave enough time to inspect sensitive commands and file
 changes.
+
+`SLASHTOKEN_CODEX_STREAM_LIMIT_BYTES` bounds the size of a single App Server stdout
+line. Codex file-change notifications can carry large diffs, so this defaults to 16 MiB
+rather than Python's 64 KiB stream default. A line larger than the limit fails the
+transport with `stdout_line_limit_exceeded` instead of silently killing the reader.
+
+### Run liveness and diagnostics
+
+A run stays `running` while the model is legitimately quiet. After
+`SLASHTOKEN_CODEX_IDLE_DIAGNOSTIC_SECONDS` of silence the run manager probes the
+transport and reports a separate `liveness` value of `active` or `unresponsive`:
+
+- `unresponsive` means SlashToken has seen no event for the idle window while the
+  transport still appears alive. The run is **not** terminated on silence alone; the
+  browser surfaces `running · unresponsive` so the condition is visible.
+- If the probe finds the stdout reader task dead or the subprocess exited, it wakes
+  the blocked consumer and the run finalizes as `failed` with a specific code.
+
+Transport failure codes recorded in `failure_code`:
+
+- `stdout_line_limit_exceeded` — a stdout line exceeded the configured stream limit.
+- `stdout_reader_failed` — the stdout reader task raised an unexpected exception.
+- `app_server_exited` — the App Server subprocess exited unexpectedly.
+- `invalid_json` — the App Server emitted a non-JSON stdout line.
+- `backend_shutdown` — the FastAPI application shut down while the run was active; a
+  privacy-safe health snapshot is persisted alongside it.
 
 ## MCP server
 

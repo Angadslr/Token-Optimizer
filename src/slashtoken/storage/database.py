@@ -66,6 +66,10 @@ CREATE TABLE IF NOT EXISTS codex_runs (
     )),
     failure_code TEXT,
     usage_json TEXT NOT NULL DEFAULT '{}',
+    last_event_at INTEGER,
+    last_event_method TEXT,
+    liveness TEXT,
+    health_json TEXT,
     started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     completed_at TEXT,
@@ -126,6 +130,21 @@ class SlashTokenDatabase:
                     ADD COLUMN optimizer_cost_available INTEGER NOT NULL DEFAULT 0
                     """
                 )
+            codex_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(codex_runs)")
+            }
+            codex_additions = {
+                "last_event_at": "INTEGER",
+                "last_event_method": "TEXT",
+                "liveness": "TEXT",
+                "health_json": "TEXT",
+            }
+            for name, column_type in codex_additions.items():
+                if name not in codex_columns:
+                    connection.execute(
+                        f"ALTER TABLE codex_runs ADD COLUMN {name} {column_type}"
+                    )
             connection.commit()
         finally:
             connection.close()

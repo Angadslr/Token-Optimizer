@@ -5,6 +5,7 @@ import unittest
 from slashtoken.core.models import DecisionStatus, FallbackReason, OptimizationRequest
 from slashtoken.core.pipeline import OptimizationPipeline
 from slashtoken.core.routing import RoutingThreshold, ThresholdRegistry
+from slashtoken.providers.base import ProviderUnavailableError
 from tests.helpers import MultilingualTokenCounter, FakeProvider
 
 
@@ -28,6 +29,58 @@ class PipelineTests(unittest.TestCase):
         self.assertFalse(decision.auto_run_eligible)
         self.assertEqual(provider.transform_calls, 1)
         self.assertEqual(provider.verify_calls, 1)
+
+    def test_temporary_provider_failure_bypasses_to_original(self):
+        class UnavailableProvider(FakeProvider):
+            def transform(self, **kwargs):
+                raise ProviderUnavailableError(
+                    stage="prompt_transformation", status_code=529
+                )
+
+        pipeline = OptimizationPipeline(
+            provider=UnavailableProvider(candidate="unused"),
+            token_counter=MultilingualTokenCounter(),
+            minimum_source_tokens=1,
+        )
+
+        decision = pipeline.optimize(self.request())
+
+        self.assertEqual(decision.status, DecisionStatus.BYPASSED)
+        self.assertEqual(
+            decision.fallback_reason,
+            FallbackReason.PROVIDER_UNAVAILABLE,
+        )
+        self.assertIsNone(decision.candidate_prompt)
+        self.assertIn("original-language prompt is ready", decision.receipt)
+        self.assertIn("Output optimization will still apply", decision.receipt)
+        self.assertNotIn("529", decision.receipt)
+
+    def test_temporary_verification_failure_discards_unverified_candidate(self):
+        class VerificationUnavailableProvider(FakeProvider):
+            def verify(self, **kwargs):
+                self.verify_calls += 1
+                raise ProviderUnavailableError(
+                    stage="semantic_verification", status_code=529
+                )
+
+        pipeline = OptimizationPipeline(
+            provider=VerificationUnavailableProvider(
+                candidate="Analyze concurrency. Reply Chinese with fixes and tests."
+            ),
+            token_counter=MultilingualTokenCounter(),
+            minimum_source_tokens=1,
+        )
+
+        decision = pipeline.optimize(self.request())
+
+        self.assertEqual(decision.status, DecisionStatus.BYPASSED)
+        self.assertEqual(
+            decision.fallback_reason,
+            FallbackReason.PROVIDER_UNAVAILABLE,
+        )
+        self.assertIsNone(decision.candidate_prompt)
+        self.assertEqual(len(decision.stage_usage), 1)
+        self.assertEqual(decision.stage_usage[0].stage, "prompt_transformation")
 
     def test_calibrated_exact_threshold_enables_auto_run(self):
         provider = FakeProvider(candidate="Analyze concurrency. Reply Chinese. Include fix tests risks rollback.")
@@ -117,7 +170,38 @@ class PipelineTests(unittest.TestCase):
         )
         decision = pipeline.optimize(self.request(prompt))
         self.assertEqual(decision.fallback_reason, FallbackReason.PROTECTED_SPAN_MISMATCH)
+        self.assertIsNone(decision.candidate_prompt)
         self.assertEqual(provider.verify_calls, 0)
+
+    def test_protected_values_are_restored_before_counting_and_verification(self):
+        prompt = "请分析 ERR-2048 和 5000 的限制，并用中文给出完整测试和修复。"
+
+        class PlaceholderPreservingProvider(FakeProvider):
+            def transform(self, **kwargs):
+                first, second = (span.value for span in kwargs["protected_spans"])
+                self.candidate = (
+                    f"Analyze {first} with limit {second}. Reply Chinese with tests and fix."
+                )
+                return super().transform(**kwargs)
+
+            def verify(self, **kwargs):
+                self.verified_candidate = kwargs["candidate_prompt"]
+                return super().verify(**kwargs)
+
+        provider = PlaceholderPreservingProvider()
+        pipeline = OptimizationPipeline(
+            provider=provider,
+            token_counter=MultilingualTokenCounter(),
+            minimum_source_tokens=1,
+        )
+
+        decision = pipeline.optimize(self.request(prompt))
+
+        self.assertEqual(decision.status, DecisionStatus.CANDIDATE)
+        self.assertIn("ERR-2048", decision.candidate_prompt)
+        self.assertIn("5000", decision.candidate_prompt)
+        self.assertNotIn("__STP_", decision.candidate_prompt)
+        self.assertEqual(provider.verified_candidate, decision.candidate_prompt)
 
     def test_semantic_verification_failure_rejects_candidate(self):
         provider = FakeProvider(

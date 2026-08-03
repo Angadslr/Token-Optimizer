@@ -21,6 +21,7 @@ from slashtoken.core.models import (
     WorkloadMode,
 )
 from slashtoken.core.pipeline import response_language_name
+from slashtoken.providers.base import ProviderUnavailableError
 from slashtoken.runtime import (
     SlashTokenRuntime,
     build_runtime,
@@ -166,6 +167,8 @@ def create_app(
                     "latency_ms": result.usage.latency_ms,
                 },
             }
+        except ProviderUnavailableError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
         except (KeyError, ValueError, RuntimeError) as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
 
@@ -244,6 +247,9 @@ def create_app(
                             "session_id": browser_session_id,
                             "silence_warning_seconds": (
                                 app.state.codex_runs.config.silence_warning_seconds
+                            ),
+                            "idle_diagnostic_seconds": (
+                                app.state.codex_runs.config.idle_diagnostic_seconds
                             ),
                         }
                     )

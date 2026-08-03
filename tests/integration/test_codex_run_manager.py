@@ -147,7 +147,7 @@ class CodexRunManagerIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         completed = await self._message(queue, "turn_complete")
         self.assertEqual(completed["status"], "failed")
-        self.assertEqual(completed["failure_code"], "codex_app_server_error")
+        self.assertEqual(completed["failure_code"], "app_server_exited")
 
     async def test_resolved_approval_rejects_duplicate_response(self):
         manager = self._manager("normal")
@@ -178,14 +178,121 @@ class CodexRunManagerIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 decision="accept",
             )
 
+    async def test_silent_turn_is_flagged_unresponsive_without_terminating(self):
+        manager = self._manager(
+            "silent_after_turn",
+            config=CodexRunConfig(
+                approval_timeout_seconds=5,
+                disconnected_grace_seconds=5,
+                approval_resolution_seconds=5,
+                interrupt_timeout_seconds=0.2,
+                silence_warning_seconds=1,
+                idle_diagnostic_seconds=0.05,
+            ),
+        )
+        queue, _ = await manager.attach(
+            session_id="browser-silent", requested_run_id=None
+        )
+        run_id = await manager.submit(
+            session_id="browser-silent",
+            decision_id=self._decision(),
+            selection="original",
+            edited_prompt=None,
+            resume_thread_id=None,
+        )
+        flagged = await self._wait(
+            queue,
+            lambda message: (
+                message.get("type") == "run_status"
+                and message.get("run", {}).get("liveness") == "unresponsive"
+                and message.get("run", {}).get("status") == "running"
+            ),
+            timeout=3,
+        )
+        self.assertEqual(flagged["run"]["run_id"], run_id)
+        with self.assertRaises(TimeoutError):
+            await self._message(queue, "turn_complete", timeout=0.3)
+        persisted = self.runtime.repository.get_codex_run(run_id)
+        self.assertEqual(persisted["status"], "running")
+        self.assertEqual(persisted["liveness"], "unresponsive")
+
+    async def test_reader_death_reaches_terminal_failure(self):
+        manager = self._manager(
+            "oversized_event",
+            stream_limit_bytes=4096,
+            config=CodexRunConfig(
+                disconnected_grace_seconds=5,
+                interrupt_timeout_seconds=0.2,
+                idle_diagnostic_seconds=0.05,
+            ),
+        )
+        queue, _ = await manager.attach(
+            session_id="browser-oversized", requested_run_id=None
+        )
+        run_id = await manager.submit(
+            session_id="browser-oversized",
+            decision_id=self._decision(),
+            selection="original",
+            edited_prompt=None,
+            resume_thread_id=None,
+        )
+        completed = await self._message(queue, "turn_complete", timeout=3)
+        self.assertEqual(completed["status"], "failed")
+        self.assertEqual(completed["failure_code"], "stdout_line_limit_exceeded")
+        self.assertEqual(
+            self.runtime.repository.get_codex_run(run_id)["status"], "failed"
+        )
+
+    async def test_close_persists_backend_shutdown_with_diagnostics(self):
+        manager = self._manager(
+            "silent_after_turn",
+            config=CodexRunConfig(
+                disconnected_grace_seconds=5,
+                interrupt_timeout_seconds=0.2,
+                idle_diagnostic_seconds=5,
+            ),
+        )
+        queue, _ = await manager.attach(
+            session_id="browser-shutdown", requested_run_id=None
+        )
+        run_id = await manager.submit(
+            session_id="browser-shutdown",
+            decision_id=self._decision(),
+            selection="original",
+            edited_prompt=None,
+            resume_thread_id=None,
+        )
+        await self._wait(
+            queue,
+            lambda message: (
+                message.get("type") == "run_status"
+                and message.get("run", {}).get("status") == "running"
+            ),
+            timeout=3,
+        )
+        await manager.close()
+        record = self.runtime.repository.get_codex_run(run_id)
+        self.assertEqual(record["status"], "interrupted")
+        self.assertEqual(record["failure_code"], "backend_shutdown")
+        self.assertIsNotNone(record["last_event_at"])
+        self.assertEqual(record["last_event_method"], "item/agentMessage/delta")
+        self.assertIsNotNone(record["health"])
+        self.assertTrue(record["health"]["process_running"])
+
     def _manager(
-        self, mode: str, *, config: CodexRunConfig | None = None
+        self,
+        mode: str,
+        *,
+        config: CodexRunConfig | None = None,
+        stream_limit_bytes: int = 16 * 1024 * 1024,
     ) -> CodexRunManager:
         fixture = Path(__file__).parent / "fixtures" / "fake_codex_app_server.py"
         manager = CodexRunManager(
             self.runtime,
             client_factory=lambda: CodexAppServerClient(
-                (sys.executable, str(fixture), mode), request_timeout_seconds=0.5
+                (sys.executable, str(fixture), mode),
+                request_timeout_seconds=0.5,
+                stream_limit_bytes=stream_limit_bytes,
             ),
             config=config or CodexRunConfig(disconnected_grace_seconds=1),
         )
@@ -213,6 +320,19 @@ class CodexRunManagerIntegrationTests(unittest.IsolatedAsyncioTestCase):
             while True:
                 message = await queue.get()
                 if message.get("type") == message_type:
+                    return message
+
+    async def _wait(
+        self,
+        queue: asyncio.Queue[dict],
+        predicate,
+        *,
+        timeout: float = 1,
+    ) -> dict:
+        async with asyncio.timeout(timeout):
+            while True:
+                message = await queue.get()
+                if predicate(message):
                     return message
 
 

@@ -17,7 +17,7 @@ from slashtoken.core.models import (
     VerificationResult,
     WorkloadMode,
 )
-from slashtoken.providers.base import PricingCatalog
+from slashtoken.providers.base import PricingCatalog, ProviderUnavailableError
 
 
 TRANSFORMATION_SYSTEM_PROMPT = """You transform prompts; you never solve them.
@@ -26,6 +26,9 @@ Translate it into compact English. Remove only filler, repeated politeness,
 redundancy, and duplicated instructions. Preserve the complete task, tone,
 uncertainty, negations, constraints, requested output behavior, protected spans,
 names, numbers, dates, URLs, code, quotations, identifiers, schemas, and formatting.
+Protected source content has been replaced by opaque tokens listed in protected_spans.
+Copy every token exactly once, unchanged and in the same relative order. Never translate,
+summarize, combine, split, reformat, or omit a protected token.
 Preserve a short instruction requiring the final answer in {response_language}.
 Return exactly {{"transformed_prompt":"..."}} with no other keys or commentary."""
 
@@ -118,13 +121,22 @@ class NvidiaDeepSeekProvider:
 
     def _complete(self, messages: list[dict[str, str]], *, stage: str, max_tokens: int):
         started = time.perf_counter()
-        response = self._client().chat.completions.create(
-            model=self.model,
-            messages=messages,
-            temperature=0,
-            max_tokens=max_tokens,
-            extra_body={"chat_template_kwargs": {"thinking": False}},
-        )
+        try:
+            response = self._client().chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=0,
+                max_tokens=max_tokens,
+                extra_body={"chat_template_kwargs": {"thinking": False}},
+            )
+        except Exception as error:
+            status_code = self._status_code(error)
+            if self._is_temporary_failure(error, status_code=status_code):
+                raise ProviderUnavailableError(
+                    stage=stage,
+                    status_code=status_code,
+                ) from error
+            raise
         latency_ms = (time.perf_counter() - started) * 1000
         text = response.choices[0].message.content
         if not text or not text.strip():
@@ -145,6 +157,26 @@ class NvidiaDeepSeekProvider:
         )
         return text.strip(), stage_usage
 
+    @staticmethod
+    def _status_code(error: BaseException) -> int | None:
+        status_code = getattr(error, "status_code", None)
+        if isinstance(status_code, int):
+            return status_code
+        response = getattr(error, "response", None)
+        response_status = getattr(response, "status_code", None)
+        return response_status if isinstance(response_status, int) else None
+
+    @staticmethod
+    def _is_temporary_failure(
+        error: BaseException, *, status_code: int | None
+    ) -> bool:
+        if status_code in {408, 409, 429}:
+            return True
+        if status_code is not None and status_code >= 500:
+            return True
+        temporary_types = {"APIConnectionError", "APITimeoutError"}
+        return any(base.__name__ in temporary_types for base in type(error).__mro__)
+
     def transform(
         self,
         *,
@@ -156,7 +188,9 @@ class NvidiaDeepSeekProvider:
         envelope = {
             "source_language": source_language,
             "source_prompt": source_prompt,
-            "protected_spans": [span.value for span in protected_spans],
+            "protected_spans": [
+                {"kind": span.kind, "token": span.value} for span in protected_spans
+            ],
         }
         raw, usage = self._complete(
             [

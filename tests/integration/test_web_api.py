@@ -10,7 +10,8 @@ except ImportError:
     httpx = None
 
 from slashtoken.core.pipeline import OptimizationPipeline
-from slashtoken.runtime import DecisionCache, SlashTokenRuntime
+from slashtoken.providers.base import ProviderUnavailableError
+from slashtoken.runtime import DecisionCache, SlashTokenRuntime, select_pending_prompt
 from slashtoken.settings.resolver import SettingsResolver
 from slashtoken.storage.database import SlashTokenDatabase
 from slashtoken.storage.repositories import SlashTokenRepository
@@ -39,6 +40,7 @@ class WebAPITests(unittest.IsolatedAsyncioTestCase):
             ),
             decisions=DecisionCache(),
         )
+        self.runtime = runtime
         from slashtoken.web.app import create_app
 
         self.client = httpx.AsyncClient(
@@ -86,6 +88,64 @@ class WebAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decision.status_code, 200)
         self.assertEqual(decision.json()["status"], "candidate")
         self.assertFalse(decision.json()["should_auto_run"])
+
+        def unavailable_chat(**kwargs):
+            raise ProviderUnavailableError(stage="target_chat", status_code=529)
+
+        self.runtime.provider.chat = unavailable_chat
+        chat = await self.client.post(
+            "/api/chat",
+            json={
+                "decision_id": decision.json()["decision_id"],
+                "selection": "original",
+                "session_id": "temporary-outage-test",
+            },
+        )
+        self.assertEqual(chat.status_code, 503)
+        self.assertIn("temporarily unavailable", chat.json()["detail"])
+        self.assertIn("HTTP 529", chat.json()["detail"])
+        self.assertNotIn("Service temporarily overloaded", chat.json()["detail"])
+
+    async def test_temporary_optimizer_outage_keeps_original_route_available(self):
+        session_id = "temporary-optimizer-outage"
+        await self.client.patch(
+            "/api/settings",
+            json={
+                "scope": "session",
+                "session_id": session_id,
+                "values": {"output_optimization": True},
+            },
+        )
+
+        def unavailable_transform(**kwargs):
+            raise ProviderUnavailableError(
+                stage="prompt_transformation", status_code=529
+            )
+
+        self.runtime.provider.transform = unavailable_transform
+        prompt = "请详细分析这个软件服务的并发错误，并用中文提供完整修复、测试和风险。"
+        response = await self.client.post(
+            "/api/optimize",
+            json={
+                "prompt": prompt,
+                "target_model": "test-model",
+                "session_id": session_id,
+                "workload_mode": "agentic_coding",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        decision = response.json()
+        self.assertEqual(decision["status"], "bypassed")
+        self.assertEqual(decision["fallback_reason"], "provider_unavailable")
+        self.assertTrue(decision["effective_settings"]["output_optimization"])
+        self.assertFalse(decision["should_auto_run"])
+        _, selected_prompt = select_pending_prompt(
+            self.runtime,
+            decision_id=decision["decision_id"],
+            selection="original",
+        )
+        self.assertEqual(selected_prompt, prompt)
 
 
 if __name__ == "__main__":
