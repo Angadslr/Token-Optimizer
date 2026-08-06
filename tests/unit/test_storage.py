@@ -53,6 +53,11 @@ class StorageTests(unittest.TestCase):
                 ).fetchone()
 
             self.assertIn("optimizer_cost_available", columns)
+            self.assertIn("candidate_language", columns)
+            self.assertIn("candidate_language_confidence", columns)
+            self.assertIn("candidate_language_reliable", columns)
+            self.assertIn("candidate_language_detector", columns)
+            self.assertIn("candidate_language_latency_ms", columns)
             self.assertIsNotNone(codex_runs)
 
     def test_database_never_contains_prompt_or_candidate_content(self):
@@ -98,6 +103,19 @@ class StorageTests(unittest.TestCase):
             self.assertNotIn(private_project.encode("utf-8"), raw)
             self.assertEqual(repository.usage_summary()["requests"], 1)
             self.assertEqual(repository.get_codex_run("run-safe")["status"], "failed")
+            with repository.database.session() as connection:
+                language = connection.execute(
+                    """
+                    SELECT candidate_language, candidate_language_reliable,
+                           candidate_language_detector
+                    FROM routing_decisions
+                    WHERE decision_id = ?
+                    """,
+                    (decision.decision_id,),
+                ).fetchone()
+            self.assertEqual(language["candidate_language"], "en")
+            self.assertEqual(language["candidate_language_reliable"], 1)
+            self.assertIn("detector", language["candidate_language_detector"])
 
 
 if __name__ == "__main__":

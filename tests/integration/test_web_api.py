@@ -87,7 +87,15 @@ class WebAPITests(unittest.IsolatedAsyncioTestCase):
         decision = await self.client.post("/api/optimize", json=body)
         self.assertEqual(decision.status_code, 200)
         self.assertEqual(decision.json()["status"], "candidate")
+        self.assertEqual(
+            decision.json()["candidate_language"]["detected_language"], "en"
+        )
+        self.assertTrue(decision.json()["candidate_language"]["reliable"])
         self.assertFalse(decision.json()["should_auto_run"])
+
+        self.assertIn('"lang.candidate"', script)
+        self.assertIn('"lang.confidence"', script)
+        self.assertIn('"lang.detector"', script)
 
         def unavailable_chat(**kwargs):
             raise ProviderUnavailableError(stage="target_chat", status_code=529)
@@ -146,6 +154,40 @@ class WebAPITests(unittest.IsolatedAsyncioTestCase):
             selection="original",
         )
         self.assertEqual(selected_prompt, prompt)
+
+    async def test_wrong_language_candidate_is_visible_but_cannot_be_approved(self):
+        self.runtime.provider.candidate = "分析并发错误；中文回答，包含修复、测试和风险。"
+        response = await self.client.post(
+            "/api/optimize",
+            json={
+                "prompt": "请详细分析这个软件服务的并发错误，并用中文提供完整修复、测试和风险。",
+                "target_model": "test-model",
+                "workload_mode": "agentic_coding",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        decision = response.json()
+        self.assertEqual(decision["status"], "rejected")
+        self.assertEqual(
+            decision["fallback_reason"], "wrong_candidate_language"
+        )
+        self.assertIsNone(decision["candidate_prompt"])
+        self.assertEqual(
+            decision["candidate_language"]["detected_language"], "zh"
+        )
+        self.assertFalse(decision["candidate_language"]["reliable"])
+        self.assertEqual(self.runtime.provider.verify_calls, 0)
+
+        approval = await self.client.post(
+            "/api/chat",
+            json={
+                "decision_id": decision["decision_id"],
+                "selection": "candidate",
+            },
+        )
+        self.assertEqual(approval.status_code, 409)
+        self.assertIn("no verified optimization candidate", approval.json()["detail"])
 
 
 if __name__ == "__main__":

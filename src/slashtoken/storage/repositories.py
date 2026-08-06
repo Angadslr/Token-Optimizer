@@ -59,6 +59,7 @@ class SlashTokenRepository:
         verification_valid = (
             int(decision.verification.valid) if decision.verification is not None else None
         )
+        language = decision.candidate_language
         tokenizer = decision.original_tokens.tokenizer
         with self.database.session() as connection:
             connection.execute(
@@ -68,9 +69,12 @@ class SlashTokenRepository:
                     target_model, workload_mode, status, fallback_reason,
                     original_tokens, candidate_tokens, token_savings, tokenizer,
                     optimizer_cost_usd, latency_ms, verification_valid,
-                    optimizer_cost_available, protected_span_count,
+                    optimizer_cost_available, candidate_language,
+                    candidate_language_confidence, candidate_language_reliable,
+                    candidate_language_detector, candidate_language_latency_ms,
+                    protected_span_count,
                     auto_run_eligible, threshold_version
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     decision.decision_id,
@@ -89,6 +93,11 @@ class SlashTokenRepository:
                     latency_ms,
                     verification_valid,
                     int(decision.optimizer_cost_available),
+                    language.detected_language if language else None,
+                    language.confidence if language else None,
+                    int(language.reliable) if language else None,
+                    language.detector if language else None,
+                    language.latency_ms if language else None,
                     decision.protected_span_count,
                     int(decision.auto_run_eligible),
                     decision.threshold_version,

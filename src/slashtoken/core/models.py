@@ -39,6 +39,7 @@ class FallbackReason(StrEnum):
     NO_TOKEN_SAVINGS = "no_token_savings"
     INEXACT_TOKENIZER = "inexact_tokenizer"
     PROTECTED_SPAN_MISMATCH = "protected_span_mismatch"
+    WRONG_CANDIDATE_LANGUAGE = "wrong_candidate_language"
     VERIFICATION_FAILED = "verification_failed"
     PROVIDER_UNAVAILABLE = "provider_unavailable"
     PROVIDER_ERROR = "provider_error"
@@ -57,6 +58,16 @@ class TokenCount:
     tokens: int
     exact: bool
     tokenizer: str
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateLanguageAssessment:
+    expected_language: str
+    detected_language: str | None
+    confidence: float
+    reliable: bool
+    detector: str
+    latency_ms: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,6 +142,7 @@ class RoutingDecision:
     fallback_reason: FallbackReason | None
     receipt: str
     verification: VerificationResult | None = None
+    candidate_language: CandidateLanguageAssessment | None = None
     stage_usage: tuple[StageUsage, ...] = field(default_factory=tuple)
     protected_span_count: int = 0
     auto_run_eligible: bool = False
@@ -169,6 +181,13 @@ class RoutingDecision:
         payload["token_savings_percent"] = round(self.token_savings_percent, 2)
         payload["optimizer_cost_usd"] = round(self.optimizer_cost_usd, 10)
         payload["optimizer_cost_available"] = self.optimizer_cost_available
+        if self.candidate_language is not None:
+            payload["candidate_language"]["confidence"] = round(
+                self.candidate_language.confidence, 6
+            )
+            payload["candidate_language"]["latency_ms"] = round(
+                self.candidate_language.latency_ms, 3
+            )
         if not include_candidate:
             payload.pop("candidate_prompt", None)
         return payload

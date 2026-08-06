@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import unittest
 
+from slashtoken.core.models import ProtectedSpan
 from slashtoken.core.protection import (
     ProtectedPlaceholderError,
     extract_protected_spans,
     missing_protected_spans,
+    prioritize_protected_spans,
     restore_protected_spans,
     shield_protected_spans,
+    summarize_placeholder_failure,
 )
 from slashtoken.core.risk import classify_risk, detect_language
 
@@ -85,6 +88,62 @@ class RiskAndProtectionTests(unittest.TestCase):
             with self.subTest(candidate=candidate):
                 with self.assertRaises(ProtectedPlaceholderError):
                     restore_protected_spans(candidate, shielded)
+
+    def test_prioritize_keeps_all_spans_below_soft_limit(self):
+        spans = (
+            ProtectedSpan(kind="quotation", value='"a"', start=0, end=3),
+            ProtectedSpan(kind="inline_code", value="`b`", start=4, end=7),
+            ProtectedSpan(kind="url", value="https://x.example", start=8, end=25),
+        )
+
+        self.assertEqual(prioritize_protected_spans(spans, soft_limit=40), spans)
+
+    def test_prioritize_drops_low_value_kinds_above_soft_limit(self):
+        spans = (
+            ProtectedSpan(kind="quotation", value='"a"', start=0, end=3),
+            ProtectedSpan(kind="inline_code", value="`b`", start=4, end=7),
+            ProtectedSpan(kind="url", value="https://x.example", start=8, end=25),
+            ProtectedSpan(kind="number", value="5000", start=26, end=30),
+        )
+
+        kept = prioritize_protected_spans(spans, soft_limit=2)
+
+        kept_kinds = {span.kind for span in kept}
+        self.assertEqual(kept_kinds, {"url", "number"})
+        self.assertNotIn("quotation", kept_kinds)
+        self.assertNotIn("inline_code", kept_kinds)
+
+    def test_prioritize_soft_limit_zero_disables_trimming(self):
+        spans = (
+            ProtectedSpan(kind="quotation", value='"a"', start=0, end=3),
+            ProtectedSpan(kind="inline_code", value="`b`", start=4, end=7),
+        )
+
+        self.assertEqual(prioritize_protected_spans(spans, soft_limit=0), spans)
+
+    def test_summary_reports_privacy_safe_mismatch_counts(self):
+        prompt = "请比较 100、200 和 `token_id`。"
+        shielded = shield_protected_spans(prompt, extract_protected_spans(prompt))
+        first, second, third = (b.placeholder for b in shielded.bindings)
+
+        candidate = f"Compare {second} and {second}."
+        summary = summarize_placeholder_failure(candidate, shielded)
+
+        self.assertIn(f"expected {len(shielded.bindings)}", summary)
+        self.assertIn("missing 2", summary)
+        self.assertIn("duplicated 1", summary)
+        for binding in shielded.bindings:
+            self.assertNotIn(binding.placeholder, summary)
+            self.assertNotIn(binding.original.value, summary)
+
+    def test_summary_reports_reordered_placeholders(self):
+        prompt = "请比较 100 和 200。"
+        shielded = shield_protected_spans(prompt, extract_protected_spans(prompt))
+        first, second = (b.placeholder for b in shielded.bindings)
+
+        summary = summarize_placeholder_failure(f"Compare {second} then {first}.", shielded)
+
+        self.assertIn("reordered", summary)
 
 
 if __name__ == "__main__":

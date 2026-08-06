@@ -132,6 +132,17 @@ def run_benchmark(
                 "prompt_verification_passed": bool(
                     decision.verification and decision.verification.valid
                 ),
+                "candidate_language": (
+                    {
+                        "detected_language": decision.candidate_language.detected_language,
+                        "confidence": decision.candidate_language.confidence,
+                        "reliable": decision.candidate_language.reliable,
+                        "detector": decision.candidate_language.detector,
+                        "latency_ms": decision.candidate_language.latency_ms,
+                    }
+                    if decision.candidate_language
+                    else None
+                ),
                 "optimizer": _stage_totals(decision.stage_usage),
                 "baseline_target": _usage_dict(baseline.usage),
                 "optimized_target": None,

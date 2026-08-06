@@ -34,24 +34,45 @@ Adapters compose it at process startup. The legacy experiment is outside this gr
 
 1. Validate input and identify the source language.
 2. Classify explicit high-stakes categories.
-3. Extract protected spans locally.
+3. Extract protected spans locally, then apply a selective-protection policy: above
+   `SLASHTOKEN_PROTECTED_SPAN_SOFT_LIMIT` spans, low-value kinds (short quotations and
+   inline backtick identifiers) are released while money, IDs, URLs, emails, and code
+   fences stay protected.
 4. Bypass unsupported, high-stakes, or very short requests.
 5. Replace protected values with collision-resistant opaque placeholders.
 6. Transform the shielded prompt into compact English while preserving every
-   placeholder exactly once and in source order.
-7. Validate placeholder identity, count, and order, then restore the exact protected
-   values locally.
-8. Compare restored protected spans character-for-character, including duplicate
-   occurrence counts.
-9. Count original and candidate tokens for the selected target model and reject
-   candidates that do not save enough.
-10. Run one structured semantic verifier.
-11. Return a decision receipt and wait for approval.
+   placeholder exactly once and in source order, sending the ordered placeholder
+   inventory and its count to the transformer.
+7. Validate placeholder identity, count, and order; on failure, transform once more
+   before rejecting, and record privacy-safe mismatch counts in the receipt.
+8. Remove placeholders from a local language-detection sample and require reliable
+   English; reject wrong or ambiguous language without a retry.
+9. Restore the exact protected values locally and compare them character-for-character,
+   including duplicate occurrence counts.
+10. Count original and candidate tokens for the selected target model and reject
+   candidates that do not save enough. GPT-5.x / GPT-4o / o-series target IDs
+   (including dotted and Codex suffixes such as `gpt-5.6-terra`) use local
+   `tiktoken` with `o200k_base`, matching OpenAI's plain-text GPT-5.x tokenizer.
+   Unknown model families fall back to an approximate UTF-8 estimate marked
+   inexact. Full Responses-API payloads with tools or images can optionally use
+   OpenAI's `POST /v1/responses/input_tokens` later; SlashToken does not call
+   that endpoint on the hot path today.
+11. Run one structured semantic verifier.
+12. Return a decision receipt and wait for approval.
 
 The transformer never regenerates protected values. A missing, duplicated, changed,
-or reordered placeholder rejects the candidate; SlashToken does not guess where the
-source content belongs. Restoring exact content may remove the projected savings, in
-which case the original route remains the correct result.
+or reordered placeholder rejects the candidate after a single retry; SlashToken does
+not guess where the source content belongs. The rejection receipt reports privacy-safe
+counts (expected, missing, duplicated, order, and generic span kinds) so operators can
+distinguish over-protection from a genuine transform failure without logging prompt
+content. Restoring exact content may remove the projected savings, in which case the
+original route remains the correct result.
+
+Production composes Lingua with only English, Chinese, Arabic, and Turkish enabled.
+`SLASHTOKEN_ENGLISH_CONFIDENCE_MARGIN` controls the minimum relative confidence
+distance and defaults to `0.15`. Detection metadata is recorded without retaining the
+candidate text. The dependency-free core keeps a conservative compatibility detector
+for isolated tests and custom composition roots.
 
 Auto-run additionally requires an exact tokenizer, a calibrated language/model
 threshold, a verified candidate, and session or local-project consent.

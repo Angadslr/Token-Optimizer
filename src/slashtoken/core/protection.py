@@ -34,6 +34,12 @@ _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("identifier", re.compile(r"\b(?=[A-Z0-9_-]{4,}\b)(?=.*[A-Z])(?=.*\d)[A-Z0-9_-]+\b")),
 )
 
+# High-density prompts can produce so many placeholders that hosted transformers
+# reliably drop or reorder some of them. When the span count crosses a soft limit,
+# these lower-value kinds are left unshielded so the high-value ones (money, IDs,
+# URLs, emails, code fences) still survive intact.
+LOW_VALUE_PROTECTED_KINDS = frozenset({"quotation", "inline_code"})
+
 
 class ProtectedPlaceholderError(ValueError):
     """Raised when a transformer changes the protected-placeholder contract."""
@@ -89,6 +95,17 @@ def missing_protected_spans(
     return tuple(missing)
 
 
+def without_protected_values(
+    candidate: str, protected_spans: Iterable[ProtectedSpan]
+) -> str:
+    """Remove the required protected occurrences before language assessment."""
+    values = Counter(span.value for span in protected_spans)
+    sample = candidate
+    for value, count in sorted(values.items(), key=lambda item: len(item[0]), reverse=True):
+        sample = sample.replace(value, " ", count)
+    return sample
+
+
 def shield_protected_spans(
     text: str, protected_spans: Iterable[ProtectedSpan]
 ) -> ShieldedPrompt:
@@ -133,7 +150,16 @@ def shield_protected_spans(
 
 
 def restore_protected_spans(candidate: str, shielded: ShieldedPrompt) -> str:
-    """Validate placeholder identity, multiplicity, and order, then restore source values."""
+    """Validate the placeholder contract, then restore exact source values."""
+    validate_protected_placeholders(candidate, shielded)
+    restored = candidate
+    for binding in shielded.bindings:
+        restored = restored.replace(binding.placeholder, binding.original.value, 1)
+    return restored
+
+
+def validate_protected_placeholders(candidate: str, shielded: ShieldedPrompt) -> None:
+    """Require every opaque placeholder exactly once and in source order."""
     positions: list[int] = []
     for binding in shielded.bindings:
         count = candidate.count(binding.placeholder)
@@ -145,7 +171,63 @@ def restore_protected_spans(candidate: str, shielded: ShieldedPrompt) -> str:
     if positions != sorted(positions):
         raise ProtectedPlaceholderError("Protected placeholders changed order.")
 
-    restored = candidate
+
+def prioritize_protected_spans(
+    spans: Iterable[ProtectedSpan], *, soft_limit: int
+) -> tuple[ProtectedSpan, ...]:
+    """Drop low-value span kinds once the placeholder count crosses a soft limit.
+
+    Over-protection is a common cause of transform failure: hosted models drop or
+    reorder tokens more often as the placeholder set grows. When the count is high
+    we keep protecting money, IDs, URLs, emails, and code fences while releasing
+    short quotations and inline backtick paths, which are cheap to get slightly
+    wrong and expensive to protect. Below the limit, nothing is dropped.
+    """
+    ordered = tuple(spans)
+    if soft_limit <= 0 or len(ordered) <= soft_limit:
+        return ordered
+    return tuple(span for span in ordered if span.kind not in LOW_VALUE_PROTECTED_KINDS)
+
+
+def summarize_placeholder_failure(candidate: str, shielded: ShieldedPrompt) -> str:
+    """Return a privacy-safe reason string for a placeholder-contract failure.
+
+    Reports only counts and generic span kinds. It never includes placeholder
+    tokens, restored values, or any prompt text, so it is safe for receipts.
+    """
+    total = len(shielded.bindings)
+    missing = 0
+    duplicated = 0
+    positions: list[int] = []
+    missing_by_kind: Counter[str] = Counter()
+    duplicated_by_kind: Counter[str] = Counter()
     for binding in shielded.bindings:
-        restored = restored.replace(binding.placeholder, binding.original.value, 1)
-    return restored
+        count = candidate.count(binding.placeholder)
+        if count == 0:
+            missing += 1
+            missing_by_kind[binding.original.kind] += 1
+        elif count > 1:
+            duplicated += 1
+            duplicated_by_kind[binding.original.kind] += 1
+        else:
+            positions.append(candidate.index(binding.placeholder))
+    reordered = positions != sorted(positions)
+
+    parts = [f"expected {total}"]
+    if missing:
+        parts.append(f"missing {missing}")
+    if duplicated:
+        parts.append(f"duplicated {duplicated}")
+    if reordered:
+        parts.append("reordered")
+
+    kinds: list[str] = []
+    for kind, count in sorted(missing_by_kind.items()):
+        kinds.append(f"{kind} missing {count}")
+    for kind, count in sorted(duplicated_by_kind.items()):
+        kinds.append(f"{kind} duplicated {count}")
+
+    summary = ", ".join(parts)
+    if kinds:
+        summary += f"; {'; '.join(kinds)}"
+    return summary

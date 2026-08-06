@@ -641,3 +641,20 @@ Y% of requests were rejected or fell back, and Z critical failures occurred.
 
 Avoid conclusions based only on the number of tokens in an English intermediate
 prompt.
+
+## Opt-in NVIDIA translation smoke test
+
+The live integration test uses the synthetic Chinese coding fixture and the same
+`/api/optimize` endpoint as the browser. It performs prompt transformation and
+semantic verification only; it does not call Codex or generate a target-model answer.
+It is skipped during ordinary test runs so CI and local development never spend API
+credits implicitly.
+
+```bash
+SLASHTOKEN_RUN_LIVE_TESTS=1 \
+  python -m unittest tests.integration.test_live_nvidia_translation -v
+```
+
+The test requires `NVIDIA_API_KEY`, prints the accepted English candidate and
+privacy-safe measurements, and fails if language, protected spans, prompt behavior,
+verification, or target-input token savings do not satisfy the route contract.

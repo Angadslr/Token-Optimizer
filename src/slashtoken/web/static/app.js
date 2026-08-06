@@ -115,6 +115,11 @@ function renderDecision(decision) {
   $("receipt").textContent = decision.receipt;
   const metrics = [
     ["lang.source", decision.source_language],
+    ["lang.candidate", decision.candidate_language?.detected_language || "not_checked"],
+    ["lang.confidence", decision.candidate_language
+      ? decision.candidate_language.confidence.toFixed(3)
+      : "not_checked"],
+    ["lang.detector", decision.candidate_language?.detector || "not_checked"],
     ["token.savings", decision.token_savings],
     ["savings.pct", `${decision.token_savings_percent}%`],
     ["protected.spans", decision.protected_span_count],

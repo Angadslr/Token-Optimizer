@@ -102,11 +102,46 @@ export SLASHTOKEN_CODEX_INTERRUPT_TIMEOUT_SECONDS=10
 export SLASHTOKEN_CODEX_SILENCE_WARNING_SECONDS=120
 export SLASHTOKEN_CODEX_IDLE_DIAGNOSTIC_SECONDS=300
 export SLASHTOKEN_CODEX_STREAM_LIMIT_BYTES=16777216
+export SLASHTOKEN_ENGLISH_CONFIDENCE_MARGIN=0.15
+export SLASHTOKEN_TRANSFORMATION_MAX_TOKENS=0
+export SLASHTOKEN_PROVIDER_TIMEOUT_SECONDS=300
+export SLASHTOKEN_PROTECTED_SPAN_SOFT_LIMIT=40
 ```
 
 All values must be greater than zero. Short values are intended only for deterministic
 tests; production use should leave enough time to inspect sensitive commands and file
 changes.
+
+`SLASHTOKEN_ENGLISH_CONFIDENCE_MARGIN` is separate from the timeout values. It must be
+at least `0` and less than `1`; higher values reject more ambiguous transformed
+candidates. Wrong-language candidates are never retried or made approvable.
+
+`SLASHTOKEN_TRANSFORMATION_MAX_TOKENS` controls only the DeepSeek prompt-
+transformation completion. Leave it unset or set it to `0`, `none`, `off`, or
+`unlimited` to omit the client-side limit. Set a positive integer such as `6000` to
+restore a cap. Restart `slashtoken ui` after changing this value.
+
+`SLASHTOKEN_PROVIDER_TIMEOUT_SECONDS` bounds each hosted DeepSeek call
+(transformation, verification, chat, and answer evaluation). It must be greater than
+zero and defaults to 300. Removing the transformation cap with
+`SLASHTOKEN_TRANSFORMATION_MAX_TOKENS=0` avoids truncating long candidates but can
+increase latency, so long non-English prompts may need a higher timeout to avoid a
+`provider_unavailable` bypass. When retries are exhausted the decision receipt records
+the failing stage and a safe cause (an HTTP status such as `HTTP 529`, or
+`timeout_or_connection`) without exposing upstream response bodies. Restart
+`slashtoken ui` after changing this value.
+
+`SLASHTOKEN_PROTECTED_SPAN_SOFT_LIMIT` caps how many protected spans a prompt may
+shield before SlashToken stops protecting low-value kinds. It must be at least `0`
+(use `0` to disable trimming) and defaults to 40. Money, IDs, URLs, emails, and code
+fences are always protected; once the count exceeds the limit, short quotations and
+inline backtick identifiers are left unshielded so the high-value spans still survive
+transformation. Over-protection is the most common cause of a `protected_span_mismatch`
+rejection on very long prompts: hosted models drop or reorder tokens more often as the
+placeholder set grows. On that rejection SlashToken transforms once, retries once, and
+if both attempts fail the receipt reports privacy-safe counts (for example
+`expected 164, missing 3, reordered; inline_code missing 2`) with no prompt content.
+Restart `slashtoken ui` after changing this value.
 
 `SLASHTOKEN_CODEX_STREAM_LIMIT_BYTES` bounds the size of a single App Server stdout
 line. Codex file-change notifications can carry large diffs, so this defaults to 16 MiB

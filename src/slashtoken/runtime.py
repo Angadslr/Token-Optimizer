@@ -82,6 +82,8 @@ class SlashTokenRuntime:
 
 
 def build_runtime(*, database_path: str | None = None) -> SlashTokenRuntime:
+    from slashtoken.providers.lingua_language import LinguaCandidateLanguageDetector
+
     if os.environ.get("SLASHTOKEN_LOAD_DOTENV") == "1":
         try:
             from dotenv import load_dotenv
@@ -111,6 +113,12 @@ def build_runtime(*, database_path: str | None = None) -> SlashTokenRuntime:
     provider = NvidiaDeepSeekProvider(
         model=optimizer_model,
         pricing=pricing,
+        transformation_max_tokens=_optional_positive_int_or_disabled(
+            "SLASHTOKEN_TRANSFORMATION_MAX_TOKENS"
+        ),
+        request_timeout_seconds=_positive_float(
+            "SLASHTOKEN_PROVIDER_TIMEOUT_SECONDS", 300.0
+        ),
     )
     thresholds_path = os.environ.get("SLASHTOKEN_THRESHOLDS_PATH")
     thresholds = (
@@ -123,6 +131,14 @@ def build_runtime(*, database_path: str | None = None) -> SlashTokenRuntime:
         token_counter=TiktokenCounter(),
         thresholds=thresholds,
         recorder=repository,
+        candidate_language_detector=LinguaCandidateLanguageDetector(
+            minimum_confidence_margin=_unit_interval_float(
+                "SLASHTOKEN_ENGLISH_CONFIDENCE_MARGIN", 0.15
+            )
+        ),
+        protected_span_soft_limit=_nonnegative_int(
+            "SLASHTOKEN_PROTECTED_SPAN_SOFT_LIMIT", 40
+        ),
     )
     return SlashTokenRuntime(
         database=database,
@@ -141,6 +157,49 @@ def _optional_nonnegative_float(name: str) -> float | None:
     parsed = float(value)
     if parsed < 0:
         raise ValueError(f"{name} cannot be negative.")
+    return parsed
+
+
+def _positive_float(name: str, default: float) -> float:
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return default
+    parsed = float(value)
+    if parsed <= 0:
+        raise ValueError(f"{name} must be greater than zero.")
+    return parsed
+
+
+def _unit_interval_float(name: str, default: float) -> float:
+    value = os.environ.get(name)
+    parsed = default if value is None or not value.strip() else float(value)
+    if not 0 <= parsed < 1:
+        raise ValueError(f"{name} must be greater than or equal to 0 and less than 1.")
+    return parsed
+
+
+def _nonnegative_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return default
+    parsed = int(value.strip())
+    if parsed < 0:
+        raise ValueError(f"{name} cannot be negative.")
+    return parsed
+
+
+def _optional_positive_int_or_disabled(name: str) -> int | None:
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return None
+    normalized = value.strip().casefold()
+    if normalized in {"0", "none", "off", "unlimited"}:
+        return None
+    parsed = int(normalized)
+    if parsed <= 0:
+        raise ValueError(
+            f"{name} must be a positive integer, 0, none, off, or unlimited."
+        )
     return parsed
 
 

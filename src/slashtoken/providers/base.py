@@ -8,6 +8,7 @@ from typing import Protocol
 
 from slashtoken.core.models import (
     AnswerEvaluationResult,
+    CandidateLanguageAssessment,
     ChatResult,
     ProtectedSpan,
     ProviderTextResult,
@@ -32,6 +33,13 @@ class ProviderUnavailableError(ProviderError):
             "Hosted provider temporarily unavailable during "
             f"{stage} after automatic retries{status}."
         )
+
+    @property
+    def safe_cause(self) -> str:
+        """Privacy-safe failure class for receipts; never upstream response text."""
+        if self.status_code is not None:
+            return f"HTTP {self.status_code}"
+        return "timeout_or_connection"
 
 
 class OptimizationProvider(Protocol):
@@ -76,6 +84,10 @@ class OptimizationProvider(Protocol):
 
 class TokenCounter(Protocol):
     def count(self, text: str, model: str) -> TokenCount: ...
+
+
+class CandidateLanguageDetector(Protocol):
+    def assess_english(self, text: str) -> CandidateLanguageAssessment: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,6 +139,34 @@ class ApproximateTokenCounter:
         )
 
 
+# Families that share OpenAI's o200k_base encoding (GPT-5.x website tokenizer).
+# tiktoken's built-in map covers `gpt-5` / `gpt-5-*` but not dotted IDs like
+# `gpt-5.6` or Codex suffixes like `gpt-5.6-terra`.
+_O200K_MODEL_PREFIXES = (
+    "gpt-5",
+    "gpt-4.1",
+    "gpt-4.5",
+    "gpt-4o",
+    "chatgpt-4o",
+    "o1",
+    "o3",
+    "o4-mini",
+)
+
+
+def model_uses_o200k_base(model: str) -> bool:
+    """Return True when *model* should use the o200k_base tokenizer."""
+    normalized = model.strip().lower()
+    if normalized.startswith("ft:"):
+        normalized = normalized[3:]
+    return any(
+        normalized == prefix
+        or normalized.startswith(f"{prefix}-")
+        or normalized.startswith(f"{prefix}.")
+        for prefix in _O200K_MODEL_PREFIXES
+    )
+
+
 class TiktokenCounter:
     """Target-model counter with an explicit approximate fallback."""
 
@@ -136,10 +176,16 @@ class TiktokenCounter:
     def count(self, text: str, model: str) -> TokenCount:
         try:
             import tiktoken
-
-            encoding = tiktoken.encoding_for_model(model)
-        except (ImportError, KeyError):
+        except ImportError:
             return self._fallback.count(text, model)
+
+        try:
+            encoding = tiktoken.encoding_for_model(model)
+        except KeyError:
+            if not model_uses_o200k_base(model):
+                return self._fallback.count(text, model)
+            encoding = tiktoken.get_encoding("o200k_base")
+
         return TokenCount(
             tokens=len(encoding.encode(text)),
             exact=True,

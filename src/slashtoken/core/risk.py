@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass
+
+from slashtoken.core.models import CandidateLanguageAssessment
 
 
 SUPPORTED_LANGUAGES = frozenset({"zh", "ar", "tr"})
@@ -21,8 +24,9 @@ _TURKISH_WORDS = {
 
 _ENGLISH_WORDS = {
     "a", "an", "and", "analyze", "answer", "as", "code", "complete", "error",
-    "for", "from", "how", "in", "is", "of", "please", "provide", "return", "test",
-    "the", "this", "to", "use", "what", "with",
+    "fix", "for", "from", "how", "in", "include", "is", "of", "please", "provide",
+    "reply", "return", "risk", "risks", "rollback", "test", "tests", "the", "this",
+    "to", "use", "what", "with",
 }
 
 _RISK_TERMS: dict[str, tuple[str, ...]] = {
@@ -57,6 +61,24 @@ _RISK_TERMS: dict[str, tuple[str, ...]] = {
 class RiskAssessment:
     high_stakes: bool
     categories: tuple[str, ...]
+
+
+class ConservativeCandidateLanguageDetector:
+    """Dependency-free compatibility detector; production composes Lingua instead."""
+
+    name = "builtin-supported-language-detector:v1"
+
+    def assess_english(self, text: str) -> CandidateLanguageAssessment:
+        started = time.perf_counter()
+        detected = detect_language(text.strip()) if text.strip() else "und"
+        return CandidateLanguageAssessment(
+            expected_language="en",
+            detected_language=None if detected == "und" else detected,
+            confidence=1.0 if detected != "und" else 0.0,
+            reliable=detected == "en",
+            detector=self.name,
+            latency_ms=(time.perf_counter() - started) * 1000,
+        )
 
 
 def detect_language(text: str) -> str:

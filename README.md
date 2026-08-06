@@ -8,6 +8,10 @@ The original prompt is captured before Codex sees it. SlashToken protects exact
 content, creates and verifies a compact English candidate, displays the routing
 evidence, and sends exactly one user-selected prompt onward.
 
+The compact-English route is checked locally with a language-aware detector before
+token-savings and semantic verification gates. A source-language or ambiguous
+candidate is rejected and cannot be approved as optimized.
+
 ## Product guarantees and boundaries
 
 - Optimization is optional routing, never an unconditional translation step.

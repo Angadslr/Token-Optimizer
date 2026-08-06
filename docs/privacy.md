@@ -16,8 +16,17 @@ The SQLite database stores:
 - Model and tokenizer identifiers.
 - Token, cost, and latency measurements.
 - Verification, threshold, and approval metadata.
+- Candidate-language code, confidence, reliability, detector version, and local
+  detection latency.
 - Codex run, thread, turn, decision, model, lifecycle, and numeric usage metadata.
 - Structured Codex failure codes and hashed project identifiers.
+- Hosted-provider unavailability diagnostics: the failing stage name and a safe cause
+  class (an HTTP status code or `timeout_or_connection`). Upstream response bodies and
+  raw exception text are never retained.
+- Protected-placeholder rejection diagnostics: expected, missing, and duplicated
+  placeholder counts, an order flag, and generic span-kind names (for example
+  `number`, `inline_code`). The opaque placeholder tokens, restored span values, and
+  prompt text are never included.
 - Run liveness diagnostics: the Codex protocol method name of the last observed
   event, its timestamp, a `liveness` label, and a transport health snapshot of
   booleans, counts, and a subprocess return code.

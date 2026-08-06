@@ -39,6 +39,11 @@ CREATE TABLE IF NOT EXISTS routing_decisions (
     optimizer_cost_available INTEGER NOT NULL,
     latency_ms REAL NOT NULL,
     verification_valid INTEGER,
+    candidate_language TEXT,
+    candidate_language_confidence REAL,
+    candidate_language_reliable INTEGER,
+    candidate_language_detector TEXT,
+    candidate_language_latency_ms REAL,
     protected_span_count INTEGER NOT NULL,
     auto_run_eligible INTEGER NOT NULL,
     threshold_version TEXT NOT NULL
@@ -123,13 +128,19 @@ class SlashTokenDatabase:
                 row["name"]
                 for row in connection.execute("PRAGMA table_info(routing_decisions)")
             }
-            if "optimizer_cost_available" not in columns:
-                connection.execute(
-                    """
-                    ALTER TABLE routing_decisions
-                    ADD COLUMN optimizer_cost_available INTEGER NOT NULL DEFAULT 0
-                    """
-                )
+            routing_additions = {
+                "optimizer_cost_available": "INTEGER NOT NULL DEFAULT 0",
+                "candidate_language": "TEXT",
+                "candidate_language_confidence": "REAL",
+                "candidate_language_reliable": "INTEGER",
+                "candidate_language_detector": "TEXT",
+                "candidate_language_latency_ms": "REAL",
+            }
+            for name, column_type in routing_additions.items():
+                if name not in columns:
+                    connection.execute(
+                        f"ALTER TABLE routing_decisions ADD COLUMN {name} {column_type}"
+                    )
             codex_columns = {
                 row["name"]
                 for row in connection.execute("PRAGMA table_info(codex_runs)")
